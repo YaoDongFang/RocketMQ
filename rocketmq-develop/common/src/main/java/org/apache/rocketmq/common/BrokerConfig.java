@@ -320,6 +320,7 @@ public class BrokerConfig extends BrokerIdentity {
 
     /**
      * Is startup controller mode, which support auto switch broker's role.
+     * 启动控制器模式,支持自动切换代理的角色。raft算法，自动选举，RaftCommitLog替换CommitLog（Leader\Follower\Leaner）
      */
     private boolean enableControllerMode = false;
 

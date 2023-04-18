@@ -55,7 +55,9 @@ public class BrokerIdentity {
     private boolean isBrokerContainer = false;
 
     // Do not set it manually, it depends on the startup mode
+    // 不要手动设置,这取决于启动模式
     // Broker start by BrokerStartup is false, start or add by BrokerContainer is true
+    // 代理先代理启动是假的,开始由经纪人或添加容器是正确的
     private boolean isInBrokerContainer = false;
 
     public BrokerIdentity() {

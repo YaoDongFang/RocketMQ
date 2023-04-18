@@ -81,6 +81,7 @@ public class ConsumerOrderInfoManager extends ConfigManager {
 
     /**
      * update the message list received
+     * 更新消息列表
      *
      * @param isRetry is retry topic or not
      * @param topic topic
@@ -366,6 +367,7 @@ public class ConsumerOrderInfoManager extends ConfigManager {
          * offset
          * offsetList[0] is the queue offset of message
          * offsetList[i] (i > 0) is the distance between current message and offsetList[0]
+         * 当前消息于开头之间的距离
          */
         @JSONField(name = "o")
         private List<Long> offsetList;
@@ -377,6 +379,7 @@ public class ConsumerOrderInfoManager extends ConfigManager {
         private Map<Long, Long> offsetNextVisibleTime;
         /**
          * message consumed count for offset
+         * 消息消耗计算偏移量
          * key: message queue offset
          */
         @JSONField(name = "oc")

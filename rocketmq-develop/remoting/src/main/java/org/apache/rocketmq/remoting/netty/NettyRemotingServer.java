@@ -385,14 +385,24 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
         }
     }
 
+    /**
+     * remotingServer#registerProcessor方法的源码也比较简单。
+     * 该方法将处理器和对应的线程池绑定为一个Pair对象，并且将这个pair对象放入processorTable中，其值就是pair对象，key就是对应的请求编码RequestCode。
+     * 每个请求，都会根据自己携带的RequestCode在processorTable中查找对应的处理器以及对应的执行器线程池来处理请求。RocketMQ通过这样的方式来提升处理请求的性能。
+     * @param requestCode
+     * @param processor
+     * @param executor
+     */
     @Override
     public void registerProcessor(int requestCode, NettyRequestProcessor processor, ExecutorService executor) {
         ExecutorService executorThis = executor;
         if (null == executor) {
+            //默认执行器是publicExecutor，线程数默认4个线程，线程名以NettyServerPublicExecutor_为前缀。
             executorThis = this.publicExecutor;
         }
-
+        //构建Pair对象
         Pair<NettyRequestProcessor, ExecutorService> pair = new Pair<>(processor, executorThis);
+        //存入nettyremotingServer的processorTable属性中
         this.processorTable.put(requestCode, pair);
     }
 
