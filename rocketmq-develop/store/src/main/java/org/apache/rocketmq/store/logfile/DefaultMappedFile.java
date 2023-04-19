@@ -130,6 +130,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
     }
 
     public DefaultMappedFile(final String fileName, final int fileSize) throws IOException {
+        //调用init初始化
         init(fileName, fileSize);
     }
 
@@ -154,18 +155,33 @@ public class DefaultMappedFile extends AbstractMappedFile {
         this.transientStorePool = transientStorePool;
     }
 
+    /**
+     * 即commitlog文件预创建，如果启用了MappedFile（MappedFile类可以看作是commitlog文件在Java中的抽象）预分配服务，
+     * 那么在创建MappedFile时会同时创建两个MappedFile，一个同步创建并返回用于本次实际使用，一个后台异步创建用于下次取用。
+     * 这样的好处是避免等到当前文件真正用完了才创建下一个文件，目的同样是提升性能。
+     * @param fileName
+     * @param fileSize
+     * @throws IOException
+     */
     private void init(final String fileName, final int fileSize) throws IOException {
+        //文件名。长度为20位，左边补零，剩余为起始偏移量，比如00000000000000000000代表了第一个文件，起始偏移量为0
         this.fileName = fileName;
+        //文件大小。默认1G=1073741824
         this.fileSize = fileSize;
+        //构建file对象
         this.file = new File(fileName);
+        //构建文件起始索引，就是取自文件名
         this.fileFromOffset = Long.parseLong(this.file.getName());
         boolean ok = false;
-
+        //确保文件目录存在
         UtilAll.ensureDirOK(this.file.getParent());
 
         try {
+            //对当前commitlog文件构建文件通道fileChannel
             this.fileChannel = new RandomAccessFile(this.file, "rw").getChannel();
+            //把commitlog文件完全的映射到虚拟内存，也就是内存映射，即mmap，提升读写性能
             this.mappedByteBuffer = this.fileChannel.map(MapMode.READ_WRITE, 0, fileSize);
+            //记录数据
             TOTAL_MAPPED_VIRTUAL_MEMORY.addAndGet(fileSize);
             TOTAL_MAPPED_FILES.incrementAndGet();
             ok = true;

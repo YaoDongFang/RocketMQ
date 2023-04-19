@@ -112,9 +112,11 @@ public class ConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCycle {
 
     @Override
     public boolean load() {
+        //调用mappedFileQueue的load方法，会对每个ConsumeQueue文件床创建一个MappedFile对象并且进行内存映射mmap操作。
         boolean result = this.mappedFileQueue.load();
         log.info("load consume queue " + this.topic + "-" + this.queueId + " " + (result ? "OK" : "Failed"));
         if (isExtReadEnable()) {
+            //扩展加载，扩展消费队列用于存储不重要的东西，如消息存储时间、过滤位图等。
             result &= this.consumeQueueExt.load();
         }
         return result;

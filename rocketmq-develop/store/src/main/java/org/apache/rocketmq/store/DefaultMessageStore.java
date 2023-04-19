@@ -354,7 +354,7 @@ public class DefaultMessageStore implements MessageStore {
              * 1 判断上次broker是否是正常退出，如果是正常退出不会保留abort文件，异常退出则会
              *
              * Broker在启动时会创建{storePathRootDir}/abort文件，并且注册钩子函数：在JVM退出时删除abort文件。
-             * 如果下一次启动时存在abort文件，说明Broker是异常退出的，文件数据可能不一直，需要进行数据修复。
+             * 如果下一次启动时存在abort文件，说明Broker是异常退出的，文件数据可能不一致，需要进行数据修复。
              */
             boolean lastExitOK = !this.isTempFileExist();
             LOGGER.info("last shutdown {}, store path root dir: {}",
@@ -375,6 +375,7 @@ public class DefaultMessageStore implements MessageStore {
             // load Consume Queue
             result = result && this.consumeQueueStore.load();
 
+            // 是否开启消费压缩
             if (messageStoreConfig.isEnableCompaction()) {
 
                 result = result && this.compactionService.load(lastExitOK);
@@ -1875,29 +1876,42 @@ public class DefaultMessageStore implements MessageStore {
         this.consumeQueueStore.checkSelf();
     }
 
+    /**
+     * 是否存在临时文件
+     * @return
+     */
     private boolean isTempFileExist() {
+        //获取临时文件路径，路径为：{storePathRootDir}/abort
         String fileName = StorePathConfigHelper.getAbortFile(this.messageStoreConfig.getStorePathRootDir());
+        //构建file文件对象
         File file = new File(fileName);
+        //判断文件是否存在
         return file.exists();
     }
 
     private void recover(final boolean lastExitOK) {
+        //消息存储恢复模式 同时 普通
         boolean recoverConcurrently = this.brokerConfig.isRecoverConcurrently();
         LOGGER.info("message store recover mode: {}", recoverConcurrently ? "concurrent" : "normal");
 
         // recover consume queue
         long recoverConsumeQueueStart = System.currentTimeMillis();
         this.recoverConsumeQueue();
+        //恢复所有的ConsumeQueue文件，返回在ConsumeQueue存储的最大有效commitlog偏移量
         long maxPhyOffsetOfConsumeQueue = this.getMaxOffsetInConsumeQueue();
         long recoverConsumeQueueEnd = System.currentTimeMillis();
 
         // recover commitlog
         if (lastExitOK) {
+            //正常恢复commitLog
             this.commitLog.recoverNormally(maxPhyOffsetOfConsumeQueue);
         } else {
+            //异常恢复commitLog
             this.commitLog.recoverAbnormally(maxPhyOffsetOfConsumeQueue);
         }
 
+        // 恢复消费者TopicQueueTable Topic消息队列路由信息
+        // opicQueueTable存储的是“topic-queueid”到当前queueId下面最大的相对偏移量的map。
         // recover consume offset table
         long recoverCommitLogEnd = System.currentTimeMillis();
         this.recoverTopicQueueTable();
@@ -1941,6 +1955,7 @@ public class DefaultMessageStore implements MessageStore {
     }
 
     public void recoverTopicQueueTable() {
+        //获取commitlog的最小偏移量
         long minPhyOffset = this.commitLog.getMinOffset();
         this.consumeQueueStore.recoverOffsetTable(minPhyOffset);
     }

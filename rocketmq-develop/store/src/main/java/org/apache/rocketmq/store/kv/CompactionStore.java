@@ -84,14 +84,17 @@ public class CompactionStore {
     }
 
     public void load(boolean exitOk) throws Exception {
+        //获取compactionLog文件所在目录
         File logRoot = new File(compactionLogPath);
+        //获取目录下文件列表，实际上下面页是topic目录列表
         File[] fileTopicList = logRoot.listFiles();
         if (fileTopicList != null) {
+            //遍历topic目录
             for (File fileTopic : fileTopicList) {
                 if (!fileTopic.isDirectory()) {
                     continue;
                 }
-
+                //获取topic目录下面的队列id目录
                 File[] fileQueueIdList = fileTopic.listFiles();
                 if (fileQueueIdList != null) {
                     for (File fileQueueId : fileQueueIdList) {
@@ -100,9 +103,12 @@ public class CompactionStore {
                         }
                         try {
                             String topic = fileTopic.getName();
+                            //获取队列id
                             int queueId = Integer.parseInt(fileQueueId.getName());
 
+                            // 进入压缩文件目录
                             if (Files.isDirectory(Paths.get(compactionCqPath, topic, String.valueOf(queueId)))) {
+                                // 创建topic,加载历史文件
                                 loadAndGetClog(topic, queueId);
                             } else {
                                 log.error("{}:{} compactionLog mismatch with compactionCq", topic, queueId);
@@ -149,8 +155,10 @@ public class CompactionStore {
             if (v == null) {
                 try {
                     v = new CompactionLog(defaultMessageStore, this, topic, queueId);
+                    //
                     v.load(true);
                     int randomDelay = 1000 + new Random(System.currentTimeMillis()).nextInt(compactionInterval);
+                    // 启动定时，更新log信息
                     compactionSchedule.scheduleWithFixedDelay(v::doCompaction, compactionInterval + randomDelay, compactionInterval + randomDelay, TimeUnit.MILLISECONDS);
                 } catch (IOException e) {
                     log.error("create compactionLog exception: ", e);

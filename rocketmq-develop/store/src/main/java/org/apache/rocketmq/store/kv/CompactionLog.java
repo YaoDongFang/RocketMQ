@@ -138,12 +138,16 @@ public class CompactionLog {
     }
 
     public void load(boolean exitOk) throws IOException, RuntimeException {
+        // 创建mappedFileQueue和consumerQueue
+        // mappedFileQueue如果有文件就加载
         initLogAndCq(exitOk);
+        // 从节点且当前queue为空，没有历史文件
         if (defaultMessageStore.getMessageStoreConfig().getBrokerRole() == BrokerRole.SLAVE
             && getLog().isMappedFilesEmpty()) {
             log.info("{}:{} load compactionLog from remote master", topic, queueId);
             loadFromRemoteAsync();
         } else {
+            // 状态设置为normal
             state.compareAndSet(State.INITIALIZING, State.NORMAL);
         }
     }
@@ -249,6 +253,7 @@ public class CompactionLog {
     private void loadFromRemoteAsync() {
         compactionStore.getCompactionSchedule().submit(() -> {
             try {
+                // 提交slave信息给master给master节点
                 pullMessageFromMaster();
             } catch (Exception e) {
                 log.error("fetch message from master exception: ", e);

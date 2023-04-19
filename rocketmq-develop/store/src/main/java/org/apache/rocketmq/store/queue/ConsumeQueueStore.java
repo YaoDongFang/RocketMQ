@@ -112,33 +112,46 @@ public class ConsumeQueueStore {
     }
 
     public boolean load() {
+        // 老版本只有一个创建
+        // 新建一个普通的消费队列
         boolean cqLoadResult = loadConsumeQueues(getStorePathConsumeQueue(this.messageStoreConfig.getStorePathRootDir()), CQType.SimpleCQ);
+        // 新建一个批量的消费队列
         boolean bcqLoadResult = loadConsumeQueues(getStorePathBatchConsumeQueue(this.messageStoreConfig.getStorePathRootDir()), CQType.BatchCQ);
         return cqLoadResult && bcqLoadResult;
     }
 
     private boolean loadConsumeQueues(String storePath, CQType cqType) {
+        //获取ConsumeQueue文件所在目录，目录路径为{storePathRootDir}/consumequeue
         File dirLogic = new File(storePath);
+        //获取目录下文件列表，实际上下面页是topic目录列表
         File[] fileTopicList = dirLogic.listFiles();
         if (fileTopicList != null) {
-
+            //遍历topic目录
             for (File fileTopic : fileTopicList) {
+                //获取topic名字
                 String topic = fileTopic.getName();
-
+                //获取topic目录下面的队列id目录
                 File[] fileQueueIdList = fileTopic.listFiles();
                 if (fileQueueIdList != null) {
                     for (File fileQueueId : fileQueueIdList) {
                         int queueId;
                         try {
+                            //获取队列id
                             queueId = Integer.parseInt(fileQueueId.getName());
                         } catch (NumberFormatException e) {
                             continue;
                         }
 
+                        // 判断消息队列是否和topic中配置一致
                         queueTypeShouldBe(topic, cqType);
 
+                        //创建ConsumeQueue对象，一个队列id目录对应着一个ConsumeQueue对象
+                        //其内部保存着
+                        //大小默认30w数据
                         ConsumeQueueInterface logic = createConsumeQueueByType(cqType, topic, queueId, storePath);
+                        //将当然ConsumeQueue对象及其对应关系存入consumeQueueTable中
                         this.putConsumeQueue(topic, queueId, logic);
+                        //加载ConsumeQueue文件
                         if (!this.load(logic)) {
                             return false;
                         }
@@ -198,8 +211,11 @@ public class ConsumeQueueStore {
     }
 
     public void recover() {
+        //遍历consumeQueueTable的value集合，即queueId到ConsumeQueue的map映射
         for (ConcurrentMap<Integer, ConsumeQueueInterface> maps : this.consumeQueueTable.values()) {
+            //遍历所有的ConsumeQueue
             for (ConsumeQueueInterface logic : maps.values()) {
+                //恢复ConsumeQueue，删除无效ConsumeQueue文件
                 this.recover(logic);
             }
         }
@@ -418,12 +434,13 @@ public class ConsumeQueueStore {
     public void recoverOffsetTable(long minPhyOffset) {
         ConcurrentMap<String, Long> cqOffsetTable = new ConcurrentHashMap<>(1024);
         ConcurrentMap<String, Long> bcqOffsetTable = new ConcurrentHashMap<>(1024);
-
+        //遍历consumeQueueTable，即consumequeue文件的集合
         for (ConcurrentMap<Integer, ConsumeQueueInterface> maps : this.consumeQueueTable.values()) {
             for (ConsumeQueueInterface logic : maps.values()) {
                 String key = logic.getTopic() + "-" + logic.getQueueId();
 
                 long maxOffsetInQueue = logic.getMaxOffsetInQueue();
+                //将“topicName-queueId”作为key，将当前queueId下面最大的相对偏移量作为value存入table
                 if (Objects.equals(CQType.BatchCQ, logic.getCQType())) {
                     bcqOffsetTable.put(key, maxOffsetInQueue);
                 } else {
@@ -474,7 +491,7 @@ public class ConsumeQueueStore {
 
             }
         }
-
+        //设置为topicQueueTable
         this.setTopicQueueTable(cqOffsetTable);
         this.setBatchTopicQueueTable(bcqOffsetTable);
     }
@@ -532,6 +549,7 @@ public class ConsumeQueueStore {
     public void truncateDirty(long phyOffset) {
         for (ConcurrentMap<Integer, ConsumeQueueInterface> maps : this.consumeQueueTable.values()) {
             for (ConsumeQueueInterface logic : maps.values()) {
+                //对每一个consumequeue文件的数据进行校验，可能会删除consumequeue文件，抑或是更新相关属性
                 this.truncateDirtyLogicFiles(logic, phyOffset);
             }
         }

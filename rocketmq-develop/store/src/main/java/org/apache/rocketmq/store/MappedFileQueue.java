@@ -190,23 +190,36 @@ public class MappedFileQueue implements Swappable {
         return mfs;
     }
 
+    /**
+     * 如果文件最大数据偏移量大于最大有效数据偏移量：
+     * 那么将文件起始偏移量大于最大有效数据偏移量的文件进行整个删除。
+     * 否则设置该文件的有效数据位置为最大有效数据偏移量。
+     * @param offset
+     */
     public void truncateDirtyFiles(long offset) {
+        //待移除的文件集合
         List<MappedFile> willRemoveFiles = new ArrayList<>();
-
+        //遍历内部所有的MappedFile文件
         for (MappedFile file : this.mappedFiles) {
+            //获取当前文件自身的最大数据偏移量
             long fileTailOffset = file.getFileFromOffset() + this.mappedFileSize;
+            //如果最大数据偏移量大于最大有效数据偏移量
             if (fileTailOffset > offset) {
+                //如果最大有效数据偏移量大于等于该文件的起始偏移量，那么说明当前文件有一部分数据是有效的，那么设置该文件的有效属性
                 if (offset >= file.getFileFromOffset()) {
+                    //设置当前文件的刷盘、提交、写入指针为当前最大有效数据偏移量
                     file.setWrotePosition((int) (offset % this.mappedFileSize));
                     file.setCommittedPosition((int) (offset % this.mappedFileSize));
                     file.setFlushedPosition((int) (offset % this.mappedFileSize));
                 } else {
+                    //如果如果最大有效数据偏移量小于该文件的起始偏移量，那么删除该文件
                     file.destroy(1000);
+                    //记录到待删除的文件集合中
                     willRemoveFiles.add(file);
                 }
             }
         }
-
+        //将等待移除的文件整体从mappedFiles中移除
         this.deleteExpiredFile(willRemoveFiles);
     }
 
@@ -235,9 +248,13 @@ public class MappedFileQueue implements Swappable {
 
 
     public boolean load() {
+        //获取commitlog文件的存放目录，目录路径取自
+        //broker.conf文件中配置的storePathCommitLog属性，默认为$HOME/store/commitlog/
         File dir = new File(this.storePath);
+        //获取内部的文件集合
         File[] ls = dir.listFiles();
         if (ls != null) {
+            //如果存在commitlog文件，那么进行加载
             return doLoad(Arrays.asList(ls));
         }
         return true;
@@ -245,13 +262,16 @@ public class MappedFileQueue implements Swappable {
 
     public boolean doLoad(List<File> files) {
         // ascending order
+        // 对commitlog文件按照文件名生序排序
         files.sort(Comparator.comparing(File::getName));
 
         for (File file : files) {
+            // 如果是目录直接跳过
             if (file.isDirectory()) {
                 continue;
             }
 
+            //校验文件实际大小是否等于预定的文件大小，如果不想等，则直接返回false，不再加载其他文件
             if (file.length() != this.mappedFileSize) {
                 log.warn(file + "\t" + file.length()
                         + " length not matched message store config value, please check it manually");
@@ -259,11 +279,19 @@ public class MappedFileQueue implements Swappable {
             }
 
             try {
+                /*
+                 * 核心代码
+                 * 每一个commitlog文件都创建一个对应的MappedFile对象
+                 */
                 MappedFile mappedFile = new DefaultMappedFile(file.getPath(), mappedFileSize);
-
+                //将wrotePosition 、flushedPosition、committedPosition 默认设置为文件大小
+                //当前文件所映射到的消息写入page cache的位置
                 mappedFile.setWrotePosition(this.mappedFileSize);
+                //刷盘的最新位置
                 mappedFile.setFlushedPosition(this.mappedFileSize);
+                //已提交的最新位置
                 mappedFile.setCommittedPosition(this.mappedFileSize);
+                //添加到MappedFileQueue内部的mappedFiles集合中
                 this.mappedFiles.add(mappedFile);
                 log.info("load " + file.getPath() + " OK");
             } catch (IOException e) {
