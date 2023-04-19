@@ -44,7 +44,7 @@ public class BatchUnregistrationService extends ServiceThread {
 
     /**
      * Submits an unregister request to this queue.
-     *
+     * 提交一个注销请求到此队列
      * @param unRegisterRequest the request to submit
      * @return {@code true} if the request was added to this queue, else {@code false}
      */
@@ -68,6 +68,7 @@ public class BatchUnregistrationService extends ServiceThread {
                 // Add polled request
                 unregistrationRequests.add(request);
 
+                // 注销broker
                 this.routeInfoManager.unRegisterBroker(unregistrationRequests);
             } catch (Throwable e) {
                 log.error("Handle unregister broker request failed", e);

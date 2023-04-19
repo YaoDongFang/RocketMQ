@@ -1759,8 +1759,12 @@ public class BrokerController {
 
         startBasicService();
 
+        // 如果没有开启DLeger的相关设置，默认没启动
         if (!isIsolated && !this.messageStoreConfig.isEnableDLegerCommitLog() && !this.messageStoreConfig.isDuplicationEnable()) {
             changeSpecialServiceStatus(this.brokerConfig.getBrokerId() == MixAll.MASTER_ID);
+            // 强制注册当前broker信息到所有的nameServer
+            // 内部调用的doRegisterBrokerAll方法执行注册，调用该方法之前，会判断是否需要注册，
+            // 如果如果forceRegister为true，表示强制注册，或者如果当前broker应该注册，那么向nameServer进行注册。
             this.registerBrokerAll(true, false, true);
         }
 
@@ -1779,6 +1783,14 @@ public class BrokerController {
                         return;
                     }
                     //定时发送心跳包并上报数据
+                    // 1.broker的信息会向nameServer集群中的每一个节点都上报数据，即心跳包，上报的数据包括broker的基本信息，
+                    // 例如brokerAddr、brokerId、brokerName、clusterName等，以及该broker的topic配置信息，比如topicName名字、perm权限、读写队列数量等等属性，
+                    // 当前上报的数据的时间戳版本Dataversion，以及消费过滤信息集合filterServerList。
+                    // 2.nameServer收到心跳包之后会解析数据并存储在RouteInfoManager的5个map属性中
+                    // topicQueueTable、brokerAddrTable、clusterAddrTable、brokerLiveTable、filterServerTable。
+                    // 3.每个nameserver之间不会互相通信，数据不会同步，另外，Nameserver的所有路由数据都存储在内存中，不存在持久化操作，所以nameserver非常的轻量级。
+                    // 4.nameServer没有数据同步、持久化等机制，这可能会造成数据的不一致，但是能够保证服务的高可用，
+                    // 而对于RocketMQ这样的组件来说，可以牺牲一时的数据不一致，但是不能容忍服务的不可，即nameServer保证了CAP中的AP。
                     BrokerController.this.registerBrokerAll(true, false, brokerConfig.isForceRegister());
                 } catch (Throwable e) {
                     BrokerController.LOG.error("registerBrokerAll Exception", e);
@@ -1873,8 +1885,19 @@ public class BrokerController {
         doRegisterBrokerAll(true, false, topicConfigSerializeWrapper);
     }
 
+    /**
+     * BrokerController的方法
+     * 注册Broker信息到NameServer，发送心跳包
+     *
+     * @param checkOrderConfig 是否检测顺序topic
+     * @param oneway           是否是单向
+     * @param forceRegister    是否强制注册
+     */
     public synchronized void registerBrokerAll(final boolean checkOrderConfig, boolean oneway, boolean forceRegister) {
 
+        // 根据TopicConfigManager中的topic信息构建topic信息的传输协议对象，
+        // 在此前的topicConfigManager.load()方法中已经加载了所有topic信息，
+        // topic配置文件加载路径为{user.home}/store/config/topics.json
         TopicConfigAndMappingSerializeWrapper topicConfigWrapper = new TopicConfigAndMappingSerializeWrapper();
 
         topicConfigWrapper.setDataVersion(this.getTopicConfigManager().getDataVersion());
@@ -1883,11 +1906,12 @@ public class BrokerController {
         topicConfigWrapper.setTopicQueueMappingInfoMap(this.getTopicQueueMappingManager().getTopicQueueMappingTable().entrySet().stream().map(
             entry -> new AbstractMap.SimpleImmutableEntry<>(entry.getKey(), TopicQueueMappingDetail.cloneAsMappingInfo(entry.getValue()))
         ).collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
-
+        //如果当前broker权限不支持写或者读
         if (!PermName.isWriteable(this.getBrokerConfig().getBrokerPermission())
             || !PermName.isReadable(this.getBrokerConfig().getBrokerPermission())) {
             ConcurrentHashMap<String, TopicConfig> topicConfigTable = new ConcurrentHashMap<>();
             for (TopicConfig topicConfig : topicConfigWrapper.getTopicConfigTable().values()) {
+                //那么重新配置topic权限
                 TopicConfig tmp =
                     new TopicConfig(topicConfig.getTopicName(), topicConfig.getReadQueueNums(), topicConfig.getWriteQueueNums(),
                         topicConfig.getPerm() & this.brokerConfig.getBrokerPermission(), topicConfig.getTopicSysFlag());
@@ -1896,16 +1920,29 @@ public class BrokerController {
             topicConfigWrapper.setTopicConfigTable(topicConfigTable);
         }
 
+        /*
+         * 如果forceRegister为true，表示强制注册，或者如果当前broker应该注册，那么向nameServer进行注册
+         */
         if (forceRegister || needRegister(this.brokerConfig.getBrokerClusterName(),
             this.getBrokerAddr(),
             this.brokerConfig.getBrokerName(),
             this.brokerConfig.getBrokerId(),
             this.brokerConfig.getRegisterBrokerTimeoutMills(),
             this.brokerConfig.isInBrokerContainer())) {
+            /*
+             * 执行注册
+             */
             doRegisterBrokerAll(checkOrderConfig, oneway, topicConfigWrapper);
         }
     }
 
+    /**
+     * BrokerController的方法
+     *
+     * @param checkOrderConfig   是否检测顺序topic
+     * @param oneway             是否是单向
+     * @param topicConfigWrapper topic信息的传输协议包装对象
+     */
     protected void doRegisterBrokerAll(boolean checkOrderConfig, boolean oneway,
         TopicConfigSerializeWrapper topicConfigWrapper) {
 
@@ -1913,12 +1950,17 @@ public class BrokerController {
             BrokerController.LOG.info("BrokerController#doResterBrokerAll: broker has shutdown, no need to register any more.");
             return;
         }
+        /*
+         * 执行注册，broker作为客户端向所有的nameserver发起注册请求
+         */
         List<RegisterBrokerResult> registerBrokerResultList = this.brokerOuterAPI.registerBrokerAll(
             this.brokerConfig.getBrokerClusterName(),
             this.getBrokerAddr(),
             this.brokerConfig.getBrokerName(),
             this.brokerConfig.getBrokerId(),
             this.getHAServerAddr(),
+                //包含了携带topic信息的topicConfigTable，以及版本信息的dataVersion
+                //这两个信息保存在持久化文件topics.json中
             topicConfigWrapper,
             this.filterServerManager.buildNewFilterServerList(),
             oneway,
@@ -1927,7 +1969,9 @@ public class BrokerController {
             this.brokerConfig.isCompressedRegister(),
             this.brokerConfig.isEnableSlaveActingMaster() ? this.brokerConfig.getBrokerNotActiveTimeoutMillis() : null,
             this.getBrokerIdentity());
-
+        /*
+         * 对执行结果进行处理，选择抵押给调用的结果作为默认数据设置
+         */
         handleRegisterBrokerResult(registerBrokerResultList, checkOrderConfig);
     }
 
@@ -2004,16 +2048,33 @@ public class BrokerController {
         }
     }
 
+    /**
+     * BrokerController的方法
+     * <p>
+     * broker是否需要向nemeserver中注册
+     *
+     * @param clusterName  集群名
+     * @param brokerAddr   broker地址
+     * @param brokerName   broker名字
+     * @param brokerId     brkerid
+     * @param timeoutMills 超时时间
+     * @return broker是否需要向nemeserver中注册
+     */
     private boolean needRegister(final String clusterName,
         final String brokerAddr,
         final String brokerName,
         final long brokerId,
         final int timeoutMills,
         final boolean isInBrokerContainer) {
-
+        //根据TopicConfigManager中的topic信息构建topic信息的传输协议对象，
+        //在此前的topicConfigManager.load()方法中已经加载了所有topic信息，topic配置文件加载路径为{user.home}/store/config/topics.json
         TopicConfigSerializeWrapper topicConfigWrapper = this.getTopicConfigManager().buildTopicConfigSerializeWrapper();
+        /*
+         * 获取所有nameServer的DataVersion数据，一一对比自身数据是否一致，如果有一个nameserver的DataVersion数据版本不一致则重新注册
+         */
         List<Boolean> changeList = brokerOuterAPI.needRegister(clusterName, brokerAddr, brokerName, brokerId, topicConfigWrapper, timeoutMills, isInBrokerContainer);
         boolean needRegister = false;
+        //如果和一个nameServer的数据版本不一致，则需要重新注册
         for (Boolean changed : changeList) {
             if (changed) {
                 needRegister = true;

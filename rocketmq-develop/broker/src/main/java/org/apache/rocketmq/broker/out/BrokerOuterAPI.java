@@ -472,11 +472,18 @@ public class BrokerOuterAPI {
         final boolean compressed,
         final Long heartbeatTimeoutMillis,
         final BrokerIdentity brokerIdentity) {
-
+        //创建一个CopyOnWriteArrayList类型的集合，用来保存请求的返回结果
+        // 线程安全和控制并发1：
+        // 因为需要在多线程中将执行结果并行存入集合中， RocketMQ使用了CopyOnWriteArrayList这个并发集合来保证线程安全。
+        // CopyOnWriteArrayList采用COW（Copy On Write）机制，即写是复制，读数据时完全没有控制，即不会加锁。
+        // 写数据时加独占锁，并且会复制出一个新的List，在新的List中写入数据，写完了之后使用新的List替换旧的List。
         final List<RegisterBrokerResult> registerBrokerResultList = new CopyOnWriteArrayList<>();
+        //获取全部nameServer地址
         List<String> nameServerAddressList = this.remotingClient.getAvailableNameSrvList();
         if (nameServerAddressList != null && nameServerAddressList.size() > 0) {
-
+            /*
+             * 构造请求头，将一些broker信息放入请求头
+             */
             final RegisterBrokerRequestHeader requestHeader = new RegisterBrokerRequestHeader();
             requestHeader.setBrokerAddr(brokerAddr);
             requestHeader.setBrokerId(brokerId);
@@ -488,19 +495,32 @@ public class BrokerOuterAPI {
             if (heartbeatTimeoutMillis != null) {
                 requestHeader.setHeartbeatTimeoutMillis(heartbeatTimeoutMillis);
             }
-
+            /*
+             * 构造请求体，将携带topic信息的topicConfigTable，以及版本信息的dataVersion，以及消费过滤信息集合放入请求体
+             */
             RegisterBrokerBody requestBody = new RegisterBrokerBody();
             requestBody.setTopicConfigSerializeWrapper(TopicConfigAndMappingSerializeWrapper.from(topicConfigWrapper));
             requestBody.setFilterServerList(filterServerList);
             final byte[] body = requestBody.encode(compressed);
             final int bodyCrc32 = UtilAll.crc32(body);
             requestHeader.setBodyCrc32(bodyCrc32);
+            /*
+             * 使用CountDownLatch作为倒计数器，用于并发控制
+             * CountDownLatch可以让主线程等待，直到任务全部执行完毕之后，再唤醒主线程继续后面的逻辑
+             */
             final CountDownLatch countDownLatch = new CountDownLatch(nameServerAddressList.size());
+            /*
+             * 采用线程池的方式，即多线程并发的向所有的nameserver发起注册请求
+             */
             for (final String namesrvAddr : nameServerAddressList) {
+                //因为broker要向所有的nameServer进行注册，为了提升性能，
+                // registerBrokerAll方法里面使用了多线程机制，使用brokerOuterExecutor线程池并行的发起对于每个nameserver的注册请求。
+                //并发的执行线程任务
                 brokerOuterExecutor.execute(new AbstractBrokerRunnable(brokerIdentity) {
                     @Override
                     public void run0() {
                         try {
+                            //发起注册请求
                             RegisterBrokerResult result = registerBroker(namesrvAddr, oneway, timeoutMills, requestHeader, body);
                             if (result != null) {
                                 registerBrokerResultList.add(result);
@@ -510,6 +530,9 @@ public class BrokerOuterAPI {
                         } catch (Exception e) {
                             LOGGER.error("Failed to register current broker to name server. TargetHost={}", namesrvAddr, e);
                         } finally {
+                            /*
+                             * 每一个请求执行完毕，无论是正常还是异常，都需要减少一个计数
+                             */
                             countDownLatch.countDown();
                         }
                     }
@@ -517,6 +540,9 @@ public class BrokerOuterAPI {
             }
 
             try {
+                /*
+                 * 主线程在此限时等待6000ms，直到上面的任务全部执行完毕之后，计数变为0，会唤醒主线程继续后面的逻辑
+                 */
                 if (!countDownLatch.await(timeoutMills, TimeUnit.MILLISECONDS)) {
                     LOGGER.warn("Registration to one or more name servers does NOT complete within deadline. Timeout threshold: {}ms", timeoutMills);
                 }
@@ -527,6 +553,10 @@ public class BrokerOuterAPI {
         return registerBrokerResultList;
     }
 
+    /**
+     * BrokerOuterAPI的方法
+     * 注册broker
+     */
     private RegisterBrokerResult registerBroker(
         final String namesrvAddr,
         final boolean oneway,
@@ -535,9 +565,10 @@ public class BrokerOuterAPI {
         final byte[] body
     ) throws RemotingCommandException, MQBrokerException, RemotingConnectException, RemotingSendRequestException, RemotingTimeoutException,
         InterruptedException {
+        //构建远程调用请求对象，code为REGISTER_BROKER，103
         RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.REGISTER_BROKER, requestHeader);
         request.setBody(body);
-
+        //如果是单向请求，则broker发起异步请求即可返回，不必关心执行结果，注册请求不是单向请求
         if (oneway) {
             try {
                 this.remotingClient.invokeOneway(namesrvAddr, request, timeoutMills);
@@ -546,11 +577,16 @@ public class BrokerOuterAPI {
             }
             return null;
         }
-
+        /*
+         * 通过remotingClient发起同步调用，非单向请求，即需要同步的获取结果
+         */
         RemotingCommand response = this.remotingClient.invokeSync(namesrvAddr, request, timeoutMills);
         assert response != null;
         switch (response.getCode()) {
             case ResponseCode.SUCCESS: {
+                /*
+                 * 解析响应数据，封装结果
+                 */
                 RegisterBrokerResponseHeader responseHeader =
                     (RegisterBrokerResponseHeader) response.decodeCommandCustomHeader(RegisterBrokerResponseHeader.class);
                 RegisterBrokerResult result = new RegisterBrokerResult();
@@ -622,7 +658,9 @@ public class BrokerOuterAPI {
         final TopicConfigSerializeWrapper topicConfigWrapper,
         final int timeoutMills,
         final boolean isInBrokerContainer) {
+        //创建一个CopyOnWriteArrayList类型的集合，用来保存请求的返回结果
         final List<Boolean> changedList = new CopyOnWriteArrayList<>();
+        //获取全部nameServer地址
         List<String> nameServerAddressList = this.remotingClient.getNameServerAddressList();
         if (nameServerAddressList != null && nameServerAddressList.size() > 0) {
             final CountDownLatch countDownLatch = new CountDownLatch(nameServerAddressList.size());
@@ -631,11 +669,15 @@ public class BrokerOuterAPI {
                     @Override
                     public void run0() {
                         try {
+                            /*
+                             * 构造请求头，将一些broker信息放入请求头
+                             */
                             QueryDataVersionRequestHeader requestHeader = new QueryDataVersionRequestHeader();
                             requestHeader.setBrokerAddr(brokerAddr);
                             requestHeader.setBrokerId(brokerId);
                             requestHeader.setBrokerName(brokerName);
                             requestHeader.setClusterName(clusterName);
+                            //构建远程调用请求对象，code为QUERY_DATA_VERSION，322
                             RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.QUERY_DATA_VERSION, requestHeader);
                             request.setBody(topicConfigWrapper.getDataVersion().encode());
                             RemotingCommand response = remotingClient.invokeSync(namesrvAddr, request, timeoutMills);
@@ -648,7 +690,9 @@ public class BrokerOuterAPI {
                                     changed = queryDataVersionResponseHeader.getChanged();
                                     byte[] body = response.getBody();
                                     if (body != null) {
+                                        //获取nameserver的dataversion
                                         nameServerDataVersion = DataVersion.decode(body, DataVersion.class);
+                                        //如果当前broker的dataversion与nameserver的dataversion不相等，则表示需要继续更新
                                         if (!topicConfigWrapper.getDataVersion().equals(nameServerDataVersion)) {
                                             changed = true;
                                         }
