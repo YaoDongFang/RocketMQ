@@ -178,17 +178,31 @@ public class NettyRemotingClient extends NettyRemotingAbstract implements Remoti
         }
     }
 
+    /**
+     * NettyRemotingClient的方法
+     * 创建netty客户端，并没有真正启动
+     */
     @Override
     public void start() {
+        //创建默认事件处理器组，默认4个线程，线程名以NettyClientWorkerThread_为前缀。
+        //主要用于执行在真正执行业务逻辑之前需要进行的SSL验证、编解码、空闲检查、网络连接管理等操作
+        //其工作时间位于IO线程组之后，process线程组之前
         if (this.defaultEventExecutorGroup == null) {
             this.defaultEventExecutorGroup = new DefaultEventExecutorGroup(
                 nettyClientConfig.getClientWorkerThreads(),
                 new ThreadFactoryImpl("NettyClientWorkerThread_"));
         }
+        /*
+         * 初始化netty客户端
+         */
+        //eventLoopGroupWorker线程组，默认一个线程
         Bootstrap handler = this.bootstrap.group(this.eventLoopGroupWorker).channel(NioSocketChannel.class)
-            .option(ChannelOption.TCP_NODELAY, true)
-            .option(ChannelOption.SO_KEEPALIVE, false)
-            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, nettyClientConfig.getConnectTimeoutMillis())
+                //对应于套接字选项中的TCP_NODELAY，该参数的使用与Nagle算法有关
+                .option(ChannelOption.TCP_NODELAY, true)
+                //对应于套接字选项中的SO_KEEPALIVE，该参数用于设置TCP连接，当设置该选项以后，连接会测试链接的状态
+                .option(ChannelOption.SO_KEEPALIVE, false)
+                //用来设置连接超时时长，单位是毫秒，默认3000
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, nettyClientConfig.getConnectTimeoutMillis())
             .handler(new ChannelInitializer<SocketChannel>() {
                 @Override
                 public void initChannel(SocketChannel ch) throws Exception {
@@ -201,12 +215,21 @@ public class NettyRemotingClient extends NettyRemotingAbstract implements Remoti
                             LOGGER.warn("Connections are insecure as SSLContext is null!");
                         }
                     }
+                    //为defaultEventExecutorGroup，添加handler
                     ch.pipeline().addLast(
                         nettyClientConfig.isDisableNettyWorkerGroup() ? null : defaultEventExecutorGroup,
-                        new NettyEncoder(),
-                        new NettyDecoder(),
+                            //RocketMQ自定义的请求解码器
+                            new NettyEncoder(),
+                            //RocketMQ自定义的请求编码器
+                            new NettyDecoder(),
+                            //Netty自带的心跳管理器，主要是用来检测远端是否存活
+                            //即测试端一定时间内未接受到被测试端消息和一定时间内向被测试端发送消息的超时时间为120秒
                         new IdleStateHandler(0, 0, nettyClientConfig.getClientChannelMaxIdleTimeSeconds()),
-                        new NettyConnectManageHandler(),
+                            //连接管理器，他负责连接的激活、断开、超时、异常等事件
+                            new NettyConnectManageHandler(),
+                            //服务请求处理器，处理RemotingCommand消息，即请求和响应的业务处理，并且返回相应的处理结果。这是重点
+                            //例如broker注册、producer/consumer获取Broker、Topic信息等请求都是该处理器处理
+                            //serverHandler最终会将请求根据不同的消息类型code分发到不同的process线程池处理
                         new NettyClientHandler());
                 }
             });
@@ -228,6 +251,14 @@ public class NettyRemotingClient extends NettyRemotingAbstract implements Remoti
             handler.option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT);
         }
 
+        /*
+         * 启动定时任务，初始启动3秒后执行，此后每隔1秒执行一次
+         * 扫描responseTable，将超时的ResponseFuture直接移除，并且执行这些超时ResponseFuture的回调
+         * 这里主要是用于处理通信时的异常情况。RocketMQ会将请求结果封装为一个ResponseFuture并且存入responseTable中。
+         * 那么在发送消息时候，如果遇到服务端没有response返回给客户端或者response因网络而丢失等异常情况。
+         * 此时可能造成responseTable中的ResponseFuture累积，因此该任务会每隔一秒扫描一次responseTable，
+         * 将超时的ResponseFuture直接移除，并且执行这些超时ResponseFuture的回调。
+         */
         TimerTask timerTaskScanResponseTable = new TimerTask() {
             @Override
             public void run(Timeout timeout) {
@@ -242,6 +273,11 @@ public class NettyRemotingClient extends NettyRemotingAbstract implements Remoti
         };
         this.timer.newTimeout(timerTaskScanResponseTable, 1000 * 3, TimeUnit.MILLISECONDS);
 
+        /*
+         * 启动定时任务，初始启动3秒后执行，此后每隔1秒执行一次
+         * 扫描存活的name srv 更新本地NettyRemotingClient 中availableNamesrvAddrMap的信息
+         * 移除不存在或不可通信的name srv 地址
+         */
         int connectTimeoutMillis = this.nettyClientConfig.getConnectTimeoutMillis();
         TimerTask timerTaskScanAvailableNameSrv = new TimerTask() {
             @Override
@@ -517,20 +553,29 @@ public class NettyRemotingClient extends NettyRemotingAbstract implements Remoti
         }
     }
 
+    /**
+     * NettyRemotingClient的方法
+     * <p>
+     * 同步调用
+     */
     @Override
     public RemotingCommand invokeSync(String addr, final RemotingCommand request, long timeoutMillis)
         throws InterruptedException, RemotingConnectException, RemotingSendRequestException, RemotingTimeoutException {
         long beginStartTime = System.currentTimeMillis();
+        //根据addr建立连接，获取channel，随机选择nameServer连接的逻辑就在这里
         final Channel channel = this.getAndCreateChannel(addr);
         String channelRemoteAddr = RemotingHelper.parseChannelRemoteAddr(channel);
         if (channel != null && channel.isActive()) {
             try {
+                //执行rpc钩子的doBeforeRequest方法
                 doBeforeRpcHooks(channelRemoteAddr, request);
                 long costTime = System.currentTimeMillis() - beginStartTime;
                 if (timeoutMillis < costTime) {
                     throw new RemotingTimeoutException("invokeSync call the addr[" + channelRemoteAddr + "] timeout");
                 }
+                //执行同步远程调用，获得调用结果
                 RemotingCommand response = this.invokeSyncImpl(channel, request, timeoutMillis - costTime);
+                //执行rpc钩子的doAfterResponse方法
                 doAfterRpcHooks(channelRemoteAddr, request, response);
                 this.updateChannelLastResponseTime(addr);
                 return response;
@@ -594,11 +639,23 @@ public class NettyRemotingClient extends NettyRemotingAbstract implements Remoti
         }
     }
 
+    /**
+     * NettyRemotingClient的方法
+     * <p>
+     * 获取并建立连接
+     *
+     * @param addr 地址
+     */
     private Channel getAndCreateChannel(final String addr) throws InterruptedException {
+        /*
+         * 如果addr为null，则获取并且创建nameServer长连接
+         */
         if (null == addr) {
             return getAndCreateNameserverChannel();
         }
-
+        /*
+         * 否则，尝试从缓存中获取长连接，获取不到才会创建
+         */
         ChannelWrapper cw = this.channelTables.get(addr);
         if (cw != null && cw.isOK()) {
             return cw.getChannel();
@@ -607,7 +664,13 @@ public class NettyRemotingClient extends NettyRemotingAbstract implements Remoti
         return this.createChannel(addr);
     }
 
+    /**
+     * NettyRemotingClient的方法
+     * 获取并建立nameServer连接
+     */
     private Channel getAndCreateNameserverChannel() throws InterruptedException {
+        //如果此前已经选择了nameServer，并且通道存在且是激活状态，那么直接获取该nameServer的通道
+        //即通道可以被不同的consumer和producer复用
         String addr = this.namesrvAddrChoosed.get();
         if (addr != null) {
             ChannelWrapper cw = this.channelTables.get(addr);
@@ -617,7 +680,9 @@ public class NettyRemotingClient extends NettyRemotingAbstract implements Remoti
         }
 
         final List<String> addrList = this.namesrvAddrList.get();
+        //加锁
         if (this.namesrvChannelLock.tryLock(LOCK_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+            //加锁之后再次判断，防止并发
             try {
                 addr = this.namesrvAddrChoosed.get();
                 if (addr != null) {
@@ -626,26 +691,36 @@ public class NettyRemotingClient extends NettyRemotingAbstract implements Remoti
                         return cw.getChannel();
                     }
                 }
-
+                /*
+                 * 选择一个nameServer建立长连接
+                 */
                 if (addrList != null && !addrList.isEmpty()) {
                     for (int i = 0; i < addrList.size(); i++) {
+                        //获取下一个nameServer的索引，初始化数据是随机生成的
                         int index = this.namesrvIndex.incrementAndGet();
+                        //取绝对值
                         index = Math.abs(index);
+                        //对nameServer集合长度取余数
                         index = index % addrList.size();
+                        //获取最终确定的nameServer地址
                         String newAddr = addrList.get(index);
-
+                        //设置到被选择的namesrvAddrChoosed属性中
                         this.namesrvAddrChoosed.set(newAddr);
                         LOGGER.info("new name server is chosen. OLD: {} , NEW: {}. namesrvIndex = {}", addr, newAddr, namesrvIndex);
+                        //针对被选择的地址建立长连接
                         Channel channelNew = this.createChannel(newAddr);
+                        //如果建立连接成功就返回，否则集训循环选择下一个nameServer地址创建
                         if (channelNew != null) {
                             return channelNew;
                         }
                     }
+                    //没有一个nameServer地址建立成功，那么抛出异常
                     throw new RemotingConnectException(addrList.toString());
                 }
             } catch (Exception e) {
                 LOGGER.error("getAndCreateNameserverChannel: create name server channel exception", e);
             } finally {
+                //解锁
                 this.namesrvChannelLock.unlock();
             }
         } else {

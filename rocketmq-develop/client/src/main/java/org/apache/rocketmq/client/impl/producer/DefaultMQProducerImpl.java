@@ -130,10 +130,18 @@ public class DefaultMQProducerImpl implements MQProducerInner {
     }
 
     public DefaultMQProducerImpl(final DefaultMQProducer defaultMQProducer, RPCHook rpcHook) {
+        //保存defaultMQProducer和rpcHook
         this.defaultMQProducer = defaultMQProducer;
         this.rpcHook = rpcHook;
 
+        /*
+         * 异步发送消息的线程池队列
+         */
         this.asyncSenderThreadPoolQueue = new LinkedBlockingQueue<>(50000);
+        /*
+         * 默认的异步发送消息的线程池
+         * 核心线程和最大线程数量都是当前服务器的可用线程数
+         */
         this.defaultAsyncSenderExecutor = new ThreadPoolExecutor(
             Runtime.getRuntime().availableProcessors(),
             Runtime.getRuntime().availableProcessors(),
@@ -206,34 +214,61 @@ public class DefaultMQProducerImpl implements MQProducerInner {
     }
 
     public void start(final boolean startFactory) throws MQClientException {
+        //根据服务状态选择走不同的代码分支
         switch (this.serviceState) {
+            /**
+             * 服务仅仅创建，而不是启动状态，那么启动服务
+             */
             case CREATE_JUST:
+                //首先修改服务状态为服务启动失败，如果最终启动成功则再修改为RUNNING
                 this.serviceState = ServiceState.START_FAILED;
-
+                /*
+                 * 1 检查生产者的配置信息
+                 * 主要是检查ProducerGroup是否符合规范，
+                 * 如果ProducerGroup为空，
+                 * 或者长度大于255个字符，
+                 * 或者包含非法字符（正常的匹配模式为 ^[%|a-zA-Z0-9_-]+$），
+                 * 或者生产者组名为默认组名DEFAULT_PRODUCER
+                 * 满足以上任意条件都校验不通过抛出异常。
+                 */
                 this.checkConfig();
 
+                //如果ProducerGroup不是CLIENT_INNER_PRODUCER，那么将修改当前的instanceName为当前进程pid，PID就是服务的进程号。
+                //CLIENT_INNER_PRODUCER是客户端内部的生产者组名，该生产者用于发送消息回退请求
                 if (!this.defaultMQProducer.getProducerGroup().equals(MixAll.CLIENT_INNER_PRODUCER_GROUP)) {
                     this.defaultMQProducer.changeInstanceNameToPID();
                 }
-                // 获取MQClientInstance实例MQClientFactory,没有则创建新的实例
+                /*
+                 * 2 获取MQClientManager实例，然后根据clientId获取或者创建CreateMQClientInstance实例，并赋给mQClientFactory变量
+                 */
                 this.mQClientFactory = MQClientManager.getInstance().getOrCreateMQClientInstance(this.defaultMQProducer, rpcHook);
-                // 在MQClientFactory中注册自己
+                /*
+                 * 3 将当前生产者注册到MQClientInstance实例的producerTable属性中
+                 */
                 boolean registerOK = mQClientFactory.registerProducer(this.defaultMQProducer.getProducerGroup(), this);
+                //如果注册失败，那么设置服务属性为CREATE_JUST，并抛出异常
                 if (!registerOK) {
                     this.serviceState = ServiceState.CREATE_JUST;
                     throw new MQClientException("The producer group[" + this.defaultMQProducer.getProducerGroup()
                         + "] has been created before, specify another name please." + FAQUrl.suggestTodo(FAQUrl.GROUP_NAME_DUPLICATE_URL),
                         null);
                 }
-                // 启动MQClientFactory
+                /*
+                 * 4 启动CreateMQClientInstance客户端通信实例
+                 * netty服务、各种定时任务、拉取消息服务、rebalanceService服务
+                 */
                 if (startFactory) {
                     mQClientFactory.start();
                 }
 
                 log.info("the producer [{}] start OK. sendMessageWithVIPChannel={}", this.defaultMQProducer.getProducerGroup(),
                     this.defaultMQProducer.isSendMessageWithVIPChannel());
+                //服务状态改为RUNNING
                 this.serviceState = ServiceState.RUNNING;
                 break;
+            /**
+             * 服务状态是其他的，那么抛出异常，即start方法仅能调用一次
+             */
             case RUNNING:
             case START_FAILED:
             case SHUTDOWN_ALREADY:
@@ -244,9 +279,13 @@ public class DefaultMQProducerImpl implements MQProducerInner {
             default:
                 break;
         }
-        // 给所有的Broker发送心跳
+        /*
+         * 5 发送心跳信息给所有broker
+         */
         this.mQClientFactory.sendHeartbeatToAllBrokerWithLock();
-
+        /*
+         * 6 启动一个定时任务，移除超时的请求，并执行异常回调，任务间隔1s
+         */
         RequestFutureHolder.getInstance().startScheduledTask(this);
 
     }

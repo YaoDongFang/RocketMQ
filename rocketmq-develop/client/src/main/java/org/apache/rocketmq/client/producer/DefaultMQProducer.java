@@ -214,14 +214,18 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
 
     /**
      * Constructor specifying namespace, producer group and RPC hook.
+     * 指定命名空间、生产者组和RPC钩子的构造函数。
      *
      * @param namespace Namespace for this MQ Producer instance.
      * @param producerGroup Producer group, see the name-sake field.
      * @param rpcHook RPC hook to execute per each remoting command execution.
      */
     public DefaultMQProducer(final String namespace, final String producerGroup, RPCHook rpcHook) {
+        //命名空间
         this.namespace = namespace;
+        //生产者组
         this.producerGroup = producerGroup;
+        //根据RPC钩子创建DefaultMQProducerImpl实例，负责发送消息
         defaultMQProducerImpl = new DefaultMQProducerImpl(this, rpcHook);
     }
 
@@ -290,6 +294,8 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
 
     /**
      * Start this producer instance. </p>
+     * 启动生产者实例
+     * 为了准备这个实例，需要执行许多内部初始化过程，因此，必须在发送或查询消息之前调用这个方法。
      *
      * <strong> Much internal initializing procedures are carried out to make this instance prepared, thus, it's a must
      * to invoke this method before sending or querying messages. </strong> </p>
@@ -298,8 +304,11 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
      */
     @Override
     public void start() throws MQClientException {
+        //根据namespace和producerGroup设置生产者组
         this.setProducerGroup(withNamespace(this.producerGroup));
+        //默认生产者实现启动
         this.defaultMQProducerImpl.start();
+        //消息轨迹跟踪服务，默认null
         if (null != traceDispatcher) {
             try {
                 traceDispatcher.start(this.getNamesrvAddr(), this.getAccessChannel());
