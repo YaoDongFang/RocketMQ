@@ -1130,11 +1130,16 @@ public class MQClientInstance {
         return null;
     }
 
+    /**
+     * MQClientInstance的方法
+     */
     public String findBrokerAddressInPublish(final String brokerName) {
         if (brokerName == null) {
             return null;
         }
+        //查询brokerAddrTable缓存的数据
         HashMap<Long/* brokerId */, String/* address */> map = this.brokerAddrTable.get(brokerName);
+        //返回Mater节点的地址
         if (map != null && !map.isEmpty()) {
             return map.get(MixAll.MASTER_ID);
         }

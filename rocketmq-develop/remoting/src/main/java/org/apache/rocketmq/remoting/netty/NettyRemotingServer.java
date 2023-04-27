@@ -291,7 +291,7 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
 
         /*
          * 启动定时任务，初始启动1秒后执行，此后每隔1秒执行一次
-         * 打印出栈，入栈信息
+         * 打印出站，入站信息
          */
         scheduledExecutorService.scheduleWithFixedDelay(() -> {
             try {

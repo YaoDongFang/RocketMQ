@@ -24,10 +24,25 @@ import org.apache.rocketmq.remoting.protocol.route.QueueData;
 import org.apache.rocketmq.remoting.protocol.route.TopicRouteData;
 
 public class TopicPublishInfo {
+    /**
+     * 是否是顺序消息
+     */
     private boolean orderTopic = false;
+    /**
+     * 是否包含路由信息
+     */
     private boolean haveTopicRouterInfo = false;
+    /**
+     * topic的消息队列集合
+     */
     private List<MessageQueue> messageQueueList = new ArrayList<>();
+    /**
+     * 当前线程线程的消息队列的下标，循环选择消息队列使用+1
+     */
     private volatile ThreadLocalIndex sendWhichQueue = new ThreadLocalIndex();
+    /**
+     * topic路由信息，包括topic的队列信息queueDatas，topic的broker信息brokerDatas，顺序topic配置orderTopicConf，消费过滤信息filterServerTable等属性
+     */
     private TopicRouteData topicRouteData;
 
     public boolean isOrderTopic() {
@@ -65,27 +80,37 @@ public class TopicPublishInfo {
     public void setHaveTopicRouterInfo(boolean haveTopicRouterInfo) {
         this.haveTopicRouterInfo = haveTopicRouterInfo;
     }
-
+    /**
+     * TopicPublishInfo的方法
+     *
+     * @param lastBrokerName 上一次发送失败的brokerName
+     */
     public MessageQueue selectOneMessageQueue(final String lastBrokerName) {
+        //如果lastBrokerName为null，即第一次发送，那么轮询选择一个
         if (lastBrokerName == null) {
             return selectOneMessageQueue();
         } else {
+            //轮询选择一个mq
             for (int i = 0; i < this.messageQueueList.size(); i++) {
                 int index = this.sendWhichQueue.incrementAndGet();
                 int pos = index % this.messageQueueList.size();
                 MessageQueue mq = this.messageQueueList.get(pos);
+                //如果mq的brokerName不等于lastBrokerName，就返回，否则选择下一个
                 if (!mq.getBrokerName().equals(lastBrokerName)) {
                     return mq;
                 }
             }
+            //没有选出来，那么轮询选择一个
             return selectOneMessageQueue();
         }
     }
 
     public MessageQueue selectOneMessageQueue() {
+        //获取下一个index
         int index = this.sendWhichQueue.incrementAndGet();
+        //取模计算索引
         int pos = index % this.messageQueueList.size();
-
+        //获取该索引的mq
         return this.messageQueueList.get(pos);
     }
 

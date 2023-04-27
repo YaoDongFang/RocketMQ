@@ -136,6 +136,7 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     private TraceDispatcher traceDispatcher = null;
 
     /**
+     * 表明消息拥堵时是否阻止消息异步发送
      * Indicate whether to block message when asynchronous sending traffic is too heavy.
      */
     private boolean enableBackpressureForAsyncMode = false;
@@ -359,7 +360,9 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     @Override
     public SendResult send(
         Message msg) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
+        //根据namespace设置topic
         msg.setTopic(withNamespace(msg.getTopic()));
+        //调用defaultMQProducerImpl#send发送消息
         return this.defaultMQProducerImpl.send(msg);
     }
 
@@ -400,7 +403,9 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     @Override
     public void send(Message msg,
         SendCallback sendCallback) throws MQClientException, RemotingException, InterruptedException {
+        //根据namespace设置topic
         msg.setTopic(withNamespace(msg.getTopic()));
+        //调用defaultMQProducerImpl#send发送消息，带有sendCallback参数
         this.defaultMQProducerImpl.send(msg, sendCallback);
     }
 
@@ -432,7 +437,9 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
      */
     @Override
     public void sendOneway(Message msg) throws MQClientException, RemotingException, InterruptedException {
+        //根据namespace设置topic
         msg.setTopic(withNamespace(msg.getTopic()));
+        //调用defaultMQProducerImpl#sendOneway发送消息
         this.defaultMQProducerImpl.sendOneway(msg);
     }
 
