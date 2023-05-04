@@ -164,13 +164,23 @@ public abstract class NettyRemotingAbstract {
      * @param ctx Channel handler context.
      * @param msg incoming remoting command.
      */
+    /**
+     * NettyRemotingAbstract的方法
+     * <p>
+     * 处理RemotingCommand命令消息，传入的远程处理命令可能是：
+     * 1、来自远程对等组件的查询请求
+     * 2、对该参与者之前发出的请求的响应
+     */
     public void processMessageReceived(ChannelHandlerContext ctx, RemotingCommand msg) {
         if (msg != null) {
             switch (msg.getType()) {
+                //处理来源服务端的请求request
                 case REQUEST_COMMAND:
                     processRequestCommand(ctx, msg);
                     break;
+                //处理来源服务端的响应response
                 case RESPONSE_COMMAND:
+                    //客户端发送消息之后服务端的响应会被processResponseCommand方法处理
                     processResponseCommand(ctx, msg);
                     break;
                 default:
@@ -352,18 +362,25 @@ public abstract class NettyRemotingAbstract {
      *
      * @param ctx channel handler context.
      * @param cmd response command instance.
+     * 客户端发送消息之后服务端的响应会被processResponseCommand方法处理
      */
     public void processResponseCommand(ChannelHandlerContext ctx, RemotingCommand cmd) {
+        //获取请求id，通过id可以获取请求结果
         final int opaque = cmd.getOpaque();
+        //根据请求标识找到之前放到responseTable的ResponseFuture
         final ResponseFuture responseFuture = responseTable.get(opaque);
         if (responseFuture != null) {
             responseFuture.setResponseCommand(cmd);
-
+            //从responseTable中移除该响应
             responseTable.remove(opaque);
 
             if (responseFuture.getInvokeCallback() != null) {
+                //如果存在回调函数，即异步请求
+                //那么调用回调函数的方法
                 executeInvokeCallback(responseFuture);
             } else {
+                //如果时同步请求，则调用putResponse方法
+                //该方法将响应数据设置到responseCommand，然后调用countDownLatch.countDown，即倒计数减去1，唤醒等待的线程
                 responseFuture.putResponse(cmd);
                 responseFuture.release();
             }
@@ -375,14 +392,17 @@ public abstract class NettyRemotingAbstract {
 
     /**
      * Execute callback in callback executor. If callback executor is null, run directly in current thread
+     * 在回调执行器中执行回调操作，如果回调执行器为null，则在当前线程中执行回调
      */
     private void executeInvokeCallback(final ResponseFuture responseFuture) {
         boolean runInThisThread = false;
+        //获取回调执行器，如果没有设置回调执行器callbackExecutor（默认没有），那么使用publicExecutor
         ExecutorService executor = this.getCallbackExecutor();
         if (executor != null && !executor.isShutdown()) {
             try {
                 executor.submit(() -> {
                     try {
+                        //通过线程池异步的执行回调操作
                         responseFuture.executeInvokeCallback();
                     } catch (Throwable e) {
                         log.warn("execute callback in executor exception, and callback throw", e);
@@ -397,7 +417,7 @@ public abstract class NettyRemotingAbstract {
         } else {
             runInThisThread = true;
         }
-
+        //在本线程中执行回调操作
         if (runInThisThread) {
             try {
                 responseFuture.executeInvokeCallback();
@@ -465,76 +485,122 @@ public abstract class NettyRemotingAbstract {
         }
     }
 
+    /**
+     * NettyRemotingAbstract的方法
+     * <p>
+     * 执行同步调用
+     * 首先创建一个ResponseFuture，然后将本次请求id和respone存入responseTable缓存。
+     * 随后执行调用，并添加一个ChannelFutureListener，消息发送完毕会进行回调。然后responseFuture通过waitResponse方法阻塞当前线程，直到得到响应结果或者到达超时时间。
+     * 当ChannelFutureListener回调的时候会判断如果消息发送成功，那么设置发送成功并返回，否则设置发送失败标志和失败原因，并且设置响应结果为null，唤醒阻塞的responseFuture。
+     * responseFuture被唤醒后会进行一系列判断。如果响应结果为null，那么会根据不同情况抛出不同的异常，如果响应结果不为null，那么返回响应结果。
+     * 最后在finaly块中从responseTable中移除响应结果缓存。
+     */
     public RemotingCommand invokeSyncImpl(final Channel channel, final RemotingCommand request,
         final long timeoutMillis)
         throws InterruptedException, RemotingSendRequestException, RemotingTimeoutException {
         //get the request id
+        //获取请求id，通过id可以获取请求结果
         final int opaque = request.getOpaque();
 
         try {
+            //创建一个Future的map成员ResponseFuture
             final ResponseFuture responseFuture = new ResponseFuture(channel, opaque, timeoutMillis, null, null);
+            //将请求id和responseFuture存入responseTable缓存中
             this.responseTable.put(opaque, responseFuture);
             final SocketAddress addr = channel.remoteAddress();
+            //发送请求，添加一个ChannelFutureListener，消息发送完毕会进行回调
             channel.writeAndFlush(request).addListener((ChannelFutureListener) f -> {
+                //如果消息发送成功，那么设置responseFuture发送成功并返回
                 if (f.isSuccess()) {
                     responseFuture.setSendRequestOK(true);
                     return;
                 }
-
+                //如果发送失败，那么从responseTable移除该缓存
                 responseFuture.setSendRequestOK(false);
                 responseTable.remove(opaque);
+                //设置失败原因
                 responseFuture.setCause(f.cause());
+                //设置响应结果为null，唤醒阻塞的responseFuture
+                //其内部调用了countDownLatch.countDown()方法
                 responseFuture.putResponse(null);
                 log.warn("Failed to write a request command to {}, caused by underlying I/O operation failure", addr);
             });
 
+            /*
+             *  responseFuture同步阻塞等待直到得到响应结果或者到达超时时间
+             * 其内部调用了countDownLatch.await(timeoutMillis, TimeUnit.MILLISECONDS)方法
+             */
             RemotingCommand responseCommand = responseFuture.waitResponse(timeoutMillis);
+            //如果响应结果为null
             if (null == responseCommand) {
+                //如果是发送成功，但是没有响应，表示等待响应超时，那么抛出超时异常
                 if (responseFuture.isSendRequestOK()) {
                     throw new RemotingTimeoutException(RemotingHelper.parseSocketAddressAddr(addr), timeoutMillis,
                         responseFuture.getCause());
                 } else {
+                    //如果是发送失败，抛出发送失败异常
                     throw new RemotingSendRequestException(RemotingHelper.parseSocketAddressAddr(addr), responseFuture.getCause());
                 }
             }
-
+            //否则返回响应结果
             return responseCommand;
         } finally {
+            //最后从responseTable中移除响应结果缓存
             this.responseTable.remove(opaque);
         }
     }
 
+    /**
+     * NettyRemotingAbstract的方法
+     * <p>
+     * 异步调用实现
+     */
     public void invokeAsyncImpl(final Channel channel, final RemotingCommand request, final long timeoutMillis,
         final InvokeCallback invokeCallback)
         throws InterruptedException, RemotingTooMuchRequestException, RemotingTimeoutException, RemotingSendRequestException {
+        //起始时间
         long beginStartTime = System.currentTimeMillis();
+        //获取请求id，通过id可以获取请求结果
         final int opaque = request.getOpaque();
+        //基于Semaphore信号量尝试获取异步发送的资源，通过信号量控制异步消息并发发送的消息数，从而保护系统内存占用。
+        //客户端异步发送的Semaphore信号量默认为65535，可通过配置"com.rocketmq.remoting.clientOnewaySemaphoreValue"系统变量更改
         boolean acquired = this.semaphoreAsync.tryAcquire(timeoutMillis, TimeUnit.MILLISECONDS);
+        //如果获取到了信号量资源
         if (acquired) {
+            //构建SemaphoreReleaseOnlyOnce对象，保证信号量本次只被释放一次，防止并发操作引起线程安全问题 CAS
             final SemaphoreReleaseOnlyOnce once = new SemaphoreReleaseOnlyOnce(this.semaphoreAsync);
+            //如果超时，则不发送
             long costTime = System.currentTimeMillis() - beginStartTime;
             if (timeoutMillis < costTime) {
                 once.release();
                 throw new RemotingTimeoutException("invokeAsyncImpl call timeout");
             }
-
+            //创建一个Future的map成员ResponseFuture，设置超时时间、回调函数
             final ResponseFuture responseFuture = new ResponseFuture(channel, opaque, timeoutMillis - costTime, invokeCallback, once);
+            //将请求id和responseFuture存入responseTable缓存中
             this.responseTable.put(opaque, responseFuture);
             try {
+                //发送请求，添加一个ChannelFutureListener，消息发送完毕会进行回调
                 channel.writeAndFlush(request).addListener((ChannelFutureListener) f -> {
+                    //如果消息发送成功，那么设置responseFuture发送成功并返回
                     if (f.isSuccess()) {
                         responseFuture.setSendRequestOK(true);
                         return;
                     }
+                    /*
+                     * 如果发送失败，则移除缓存、设置false、并且执行InvokeCallback#operationComplete回调
+                     */
                     requestFail(opaque);
                     log.warn("send a request command to channel <{}> failed.", RemotingHelper.parseChannelRemoteAddr(channel));
                 });
             } catch (Exception e) {
+                //释放信号量
                 responseFuture.release();
                 log.warn("send a request command to channel <" + RemotingHelper.parseChannelRemoteAddr(channel) + "> Exception", e);
                 throw new RemotingSendRequestException(RemotingHelper.parseChannelRemoteAddr(channel), e);
             }
         } else {
+            //如果没有获取到信号量资源，那么直接抛出异常即可，并且不再发送
             if (timeoutMillis <= 0) {
                 throw new RemotingTooMuchRequestException("invokeAsyncImpl invoke too fast");
             } else {
@@ -581,25 +647,44 @@ public abstract class NettyRemotingAbstract {
         }
     }
 
+    /**
+     * NettyRemotingAbstract的方法
+     * <p>
+     * 单向消息发送的逻辑
+     *
+     * @param channel       通道
+     * @param request       请求
+     * @param timeoutMillis 超时时间
+     */
     public void invokeOnewayImpl(final Channel channel, final RemotingCommand request, final long timeoutMillis)
         throws InterruptedException, RemotingTooMuchRequestException, RemotingTimeoutException, RemotingSendRequestException {
+        //标记为单向发送
         request.markOnewayRPC();
+        //基于Semaphore信号量尝试获取单向发送的资源，通过信号量控制单向消息并发发送的消息数，从而保护系统内存占用。
+        //客户端单向发送的Semaphore信号量默认为65535，可通过配置"com.rocketmq.remoting.clientOnewaySemaphoreValue"系统变量更改
         boolean acquired = this.semaphoreOneway.tryAcquire(timeoutMillis, TimeUnit.MILLISECONDS);
+        //如果获取到了信号量资源
         if (acquired) {
+            //构建SemaphoreReleaseOnlyOnce对象，保证信号量本次只被释放一次，防止并发操作引起线程安全问题
             final SemaphoreReleaseOnlyOnce once = new SemaphoreReleaseOnlyOnce(this.semaphoreOneway);
             try {
+                //将请求发送出去即可
                 channel.writeAndFlush(request).addListener((ChannelFutureListener) f -> {
+                    //释放信号量
                     once.release();
+                    //如果发送失败了，仅仅是打印一行warn日志，然后就不管了，这就是单向发送
                     if (!f.isSuccess()) {
                         log.warn("send a request command to channel <" + channel.remoteAddress() + "> failed.");
                     }
                 });
             } catch (Exception e) {
+                //释放信号量
                 once.release();
                 log.warn("write send a request command to channel <" + channel.remoteAddress() + "> failed.");
                 throw new RemotingSendRequestException(RemotingHelper.parseChannelRemoteAddr(channel), e);
             }
         } else {
+            //如果没有获取到信号量资源，那么直接抛出异常即可，并且不再发送
             if (timeoutMillis <= 0) {
                 throw new RemotingTooMuchRequestException("invokeOnewayImpl invoke too fast");
             } else {

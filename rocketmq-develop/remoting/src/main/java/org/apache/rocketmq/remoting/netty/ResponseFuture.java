@@ -58,7 +58,9 @@ public class ResponseFuture {
 
     public void executeInvokeCallback() {
         if (invokeCallback != null) {
+            //通过cas保证只允许一次调用
             if (this.executeCallbackOnlyOnce.compareAndSet(false, true)) {
+                //执行回调器的回调方法operationComplete
                 invokeCallback.operationComplete(this);
             }
         }
@@ -80,13 +82,30 @@ public class ResponseFuture {
         return diff > this.timeoutMillis;
     }
 
+    /**
+     * ResponseFuture的方法
+     * <p>
+     * 同步等待响应结果
+     *
+     * @param timeoutMillis 超时时间
+     */
     public RemotingCommand waitResponse(final long timeoutMillis) throws InterruptedException {
+        //使用countDownLatch等待给定的时间
         this.countDownLatch.await(timeoutMillis, TimeUnit.MILLISECONDS);
         return this.responseCommand;
     }
 
+    /**
+     * ResponseFuture的方法
+     * <p>
+     * 存入响应结果并且唤醒等待的线程
+     *
+     * @param responseCommand 响应结果
+     */
     public void putResponse(final RemotingCommand responseCommand) {
+        //存入结果
         this.responseCommand = responseCommand;
+        //倒计数减去1，唤醒等待的线程
         this.countDownLatch.countDown();
     }
 
