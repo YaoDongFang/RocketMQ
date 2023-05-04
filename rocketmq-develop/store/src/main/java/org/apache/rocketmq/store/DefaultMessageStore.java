@@ -705,11 +705,21 @@ public class DefaultMessageStore implements MessageStore {
         }
     }
 
+    /**
+     * DefaultMessageStore的方法
+     * <p>
+     * 操作系统页缓存是否繁忙
+     */
     @Override
     public boolean isOSPageCacheBusy() {
+        //一个broker将所有的消息都追加到同一个逻辑CommitLog日志文件中，因此需要通过获取putMessageLock锁来控制并发。
+        //begin表示获取CommitLog锁的开始时间
         long begin = this.getCommitLog().getBeginTimeInLock();
+        //计算锁的持有时间，当前时间减去获取锁开始时间，这个时间可以看作是处理上一个消息目前所花费的时间
         long diff = this.systemClock.now() - begin;
-
+        //如果broker持有锁的时间超过osPageCacheBusyTimeOutMills，则算作操作系统页缓存繁忙，那么会拒绝处理当前请求
+        //直观现象就是客户端抛出[REJECTREQUEST]system busy, start flow control for a while异常
+        //osPageCacheBusyTimeOutMills可以配置，默认为1000ms，即1s
         return diff < 10000000
             && diff > this.messageStoreConfig.getOsPageCacheBusyTimeOutMills();
     }
@@ -2027,11 +2037,17 @@ public class DefaultMessageStore implements MessageStore {
     }
 
     public int remainTransientStoreBufferNumbs() {
+        //检查可用buffers
         return this.transientStorePool.availableBufferNums();
     }
 
+    /**
+     * DefaultMessageStore的方法
+     * 检查临时存储池是否不足
+     */
     @Override
     public boolean isTransientStorePoolDeficient() {
+        //如果堆外内存池个数为0，则表示临时存储池是否不足
         return remainTransientStoreBufferNumbs() == 0;
     }
 
@@ -3321,6 +3337,11 @@ public class DefaultMessageStore implements MessageStore {
      * enableControllerMode is true
      *
      * @return <tt>true</tt> or <tt>false</tt>
+     */
+    /**
+     * MessageStoreConfig的方法
+     * <p>
+     * 仅当transientStorePoolEnable为true（默认false）且FlushDiskType为ASYNC_FLUSH且当前broker不是SLAVE角色时，才启用commitLog临时存储池
      */
     public boolean isTransientStorePoolEnable() {
         return this.messageStoreConfig.isTransientStorePoolEnable() &&

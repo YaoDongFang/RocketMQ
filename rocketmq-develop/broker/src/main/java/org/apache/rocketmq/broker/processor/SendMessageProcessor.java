@@ -84,11 +84,16 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         RemotingCommand request) throws RemotingCommandException {
         SendMessageContext sendMessageContext;
         switch (request.getCode()) {
+            //如果是消费者发送的消息回退请求，该请求用于实现消息重试
+            //如果消息消费失败，那么消息将被通过回退请求发送回broker，并延迟一段时间再消费
             case RequestCode.CONSUMER_SEND_MSG_BACK:
                 return this.consumerSendMsgBack(ctx, request);
+            //其他情况，都是属于生产者发送消息的请求，统一处理
             default:
+                //解析请求头
                 SendMessageRequestHeader requestHeader = parseRequestHeader(request);
                 if (requestHeader == null) {
+                    //如果请求头为null，那么返回一个null值结果
                     return null;
                 }
                 TopicQueueMappingContext mappingContext = this.brokerController.getTopicQueueMappingManager().buildTopicQueueMappingContext(requestHeader, true);
@@ -96,8 +101,10 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
                 if (rewriteResult != null) {
                     return rewriteResult;
                 }
+                //构建发送请求消息轨迹上下文
                 sendMessageContext = buildMsgContext(ctx, requestHeader, request);
                 try {
+                    //执行发送消息前钩子方法
                     this.executeSendMessageHookBefore(sendMessageContext);
                 } catch (AbortProcessException e) {
                     final RemotingCommand errorResponse = RemotingCommand.createResponseCommand(e.getResponseCode(), e.getErrorMessage());
@@ -107,9 +114,11 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
 
                 RemotingCommand response;
                 if (requestHeader.isBatch()) {
+                    //处理批量发送消息逻辑
                     response = this.sendBatchMessage(ctx, request, sendMessageContext, requestHeader, mappingContext,
                         (ctx1, response1) -> executeSendMessageHookAfter(response1, ctx1));
                 } else {
+                    //处理其他发送消息逻辑，例如单条消息
                     response = this.sendMessage(ctx, request, sendMessageContext, requestHeader, mappingContext,
                         (ctx12, response12) -> executeSendMessageHookAfter(response12, ctx12));
                 }
@@ -118,12 +127,18 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         }
     }
 
+    /**
+     * SendMessageProcessor的方法
+     * <p>
+     * 是否需要拒绝处理该请求
+     */
     @Override
     public boolean rejectRequest() {
+        //如果没有启用isEnableSlaveActingMaster && 当前的broker为slave节点
         if (!this.brokerController.getBrokerConfig().isEnableSlaveActingMaster() && this.brokerController.getMessageStoreConfig().getBrokerRole() == BrokerRole.SLAVE) {
             return true;
         }
-
+        //检查操作系统页缓存PageCache是否繁忙或者检查临时存储池transientStorePool是否不足，如果其中有一个不满足要求，则拒绝处理该请求
         if (this.brokerController.getMessageStore().isOSPageCacheBusy() || this.brokerController.getMessageStore().isTransientStorePoolDeficient()) {
             return true;
         }

@@ -81,9 +81,11 @@ public class TransientStorePool {
     }
 
     public int availableBufferNums() {
+        //如果启动，则返回可用的堆外内存池的数量
         if (messageStore.isTransientStorePoolEnable()) {
             return availableBuffers.size();
         }
+        //如果没开启则返回最大int值
         return Integer.MAX_VALUE;
     }
 

@@ -587,7 +587,10 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
 
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, RemotingCommand msg) {
+            //Netty服务端业务请求处理器的入口
+            // port = -1 通常表示该节点没有监听任何网络端口。
             int localPort = RemotingHelper.parseSocketAddressPort(ctx.channel().localAddress());
+            // remotingServerTable用于存储所有已经启动的远程通信服务器的信息
             NettyRemotingAbstract remotingAbstract = NettyRemotingServer.this.remotingServerTable.get(localPort);
             if (localPort != -1 && remotingAbstract != null) {
                 remotingAbstract.processMessageReceived(ctx, msg);

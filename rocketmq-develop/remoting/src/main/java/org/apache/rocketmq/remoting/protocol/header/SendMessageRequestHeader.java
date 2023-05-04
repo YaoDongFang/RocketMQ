@@ -167,21 +167,30 @@ public class SendMessageRequestHeader extends TopicQueueRequestHeader {
         this.batch = batch;
     }
 
+    /**
+     * AbstractSendMessageProcessor的方法
+     * <p>
+     * 解析消息请求头
+     */
     public static SendMessageRequestHeader parseRequestHeader(RemotingCommand request) throws RemotingCommandException {
         SendMessageRequestHeaderV2 requestHeaderV2 = null;
         SendMessageRequestHeader requestHeader = null;
+        //根据RequestCode解析为不同类型的请求头对象
         switch (request.getCode()) {
             case RequestCode.SEND_BATCH_MESSAGE:
             case RequestCode.SEND_MESSAGE_V2:
+                //如果是SEND_BATCH_MESSAGE和SEND_MESSAGE_V2，那么解析为SendMessageRequestHeaderV2，即轻量级请求头
                 requestHeaderV2 =
                     (SendMessageRequestHeaderV2) request
                         .decodeCommandCustomHeader(SendMessageRequestHeaderV2.class);
             case RequestCode.SEND_MESSAGE:
                 if (null == requestHeaderV2) {
+                    //解析为SendMessageRequestHeader，即普通请求头
                     requestHeader =
                         (SendMessageRequestHeader) request
                             .decodeCommandCustomHeader(SendMessageRequestHeader.class);
                 } else {
+                    //将v2转换为v1，即普通的SendMessageRequestHeader
                     requestHeader = SendMessageRequestHeaderV2.createSendMessageRequestHeaderV1(requestHeaderV2);
                 }
             default:
