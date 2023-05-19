@@ -459,6 +459,7 @@ public abstract class AbstractSendMessageProcessor implements NettyRequestProces
     protected RemotingCommand msgCheck(final ChannelHandlerContext ctx,
         final SendMessageRequestHeader requestHeader, final RemotingCommand request,
         final RemotingCommand response) {
+        //如果当前broker没有写的权限，那么broker会返回一个NO_PERMISSION异常，sending message is forbidden，禁止向该broker发送消息
         if (!PermName.isWriteable(this.brokerController.getBrokerConfig().getBrokerPermission())
             && this.brokerController.getTopicConfigManager().isOrderTopic(requestHeader.getTopic())) {
             response.setCode(ResponseCode.NO_PERMISSION);
@@ -466,21 +467,23 @@ public abstract class AbstractSendMessageProcessor implements NettyRequestProces
                 + "] sending message is forbidden");
             return response;
         }
-
+        //校验topic不能为空，必须属于合法字符regex: ^[%|a-zA-Z0-9_-]+$，且长度不超过127个字符
         TopicValidator.ValidateTopicResult result = TopicValidator.validateTopic(requestHeader.getTopic());
         if (!result.isValid()) {
             response.setCode(ResponseCode.SYSTEM_ERROR);
             response.setRemark(result.getRemark());
             return response;
         }
+        //校验如果当前topic是不为允许使用的系统topic，那么抛出异常，默认不能为SCHEDULE_TOPIC_XXXX
         if (TopicValidator.isNotAllowedSendTopic(requestHeader.getTopic())) {
             response.setCode(ResponseCode.NO_PERMISSION);
             response.setRemark("Sending message to topic[" + requestHeader.getTopic() + "] is forbidden.");
             return response;
         }
-
+        //从broker的topicConfigTable缓存中根据topicName获取TopicConfig
         TopicConfig topicConfig =
             this.brokerController.getTopicConfigManager().selectTopicConfig(requestHeader.getTopic());
+        //如果不存在该topic信息
         if (null == topicConfig) {
             int topicSysFlag = 0;
             if (requestHeader.isUnitMode()) {
@@ -492,12 +495,17 @@ public abstract class AbstractSendMessageProcessor implements NettyRequestProces
             }
 
             LOGGER.warn("the topic {} not exist, producer: {}", requestHeader.getTopic(), ctx.channel().remoteAddress());
+            /*
+             * 尝试创建普通topic
+             */
             topicConfig = this.brokerController.getTopicConfigManager().createTopicInSendMessageMethod(
                 requestHeader.getTopic(),
                 requestHeader.getDefaultTopic(),
                 RemotingHelper.parseChannelRemoteAddr(ctx.channel()),
                 requestHeader.getDefaultTopicQueueNums(), topicSysFlag);
-
+            /*
+             * 尝试创建重试topic
+             */
             if (null == topicConfig) {
                 if (requestHeader.getTopic().startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)) {
                     topicConfig =
@@ -514,7 +522,7 @@ public abstract class AbstractSendMessageProcessor implements NettyRequestProces
                 return response;
             }
         }
-
+        //校验queutId 不能大于等于该broker的读或写的最大数量
         int queueIdInt = requestHeader.getQueueId();
         int idValid = Math.max(topicConfig.getWriteQueueNums(), topicConfig.getReadQueueNums());
         if (queueIdInt >= idValid) {

@@ -248,31 +248,42 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         final TopicQueueMappingContext mappingContext,
         final SendMessageCallback sendMessageCallback) throws RemotingCommandException {
 
+        /*
+         * 1 创建响应的命令对象，包括自动创建topic的逻辑
+         */
         final RemotingCommand response = preSend(ctx, request, requestHeader);
         if (response.getCode() != -1) {
             return response;
         }
-
+        //获取响应头
         final SendMessageResponseHeader responseHeader = (SendMessageResponseHeader) response.readCustomHeader();
-
+        //获取消息体
         final byte[] body = request.getBody();
-
+        //获取队列id
         int queueIdInt = requestHeader.getQueueId();
+        //从broker的topicConfigTable缓存中根据topicName获取TopicConfig
         TopicConfig topicConfig = this.brokerController.getTopicConfigManager().selectTopicConfig(requestHeader.getTopic());
-
+        //如果队列id小于0，则随机选择一个写队列索引作为id
         if (queueIdInt < 0) {
             queueIdInt = randomQueueId(topicConfig.getWriteQueueNums());
         }
-
+        //构建消息对象，保存着要存入commitLog的数据
         MessageExtBrokerInner msgInner = new MessageExtBrokerInner();
+        //设置topic
         msgInner.setTopic(requestHeader.getTopic());
+        //设置队列id
         msgInner.setQueueId(queueIdInt);
 
         Map<String, String> oriProps = MessageDecoder.string2messageProperties(requestHeader.getProperties());
+        /*
+         * 2 处理重试和死信队列消息，将会对死信消息替换为死信topic
+         */
         if (!handleRetryAndDLQ(requestHeader, response, request, msgInner, topicConfig, oriProps)) {
             return response;
         }
-
+        /*
+         * 设置一系列属性
+         */
         msgInner.setBody(body);
         msgInner.setFlag(requestHeader.getFlag());
 
@@ -281,7 +292,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
             uniqKey = MessageClientIDSetter.createUniqID();
             oriProps.put(MessageConst.PROPERTY_UNIQ_CLIENT_MESSAGE_ID_KEYIDX, uniqKey);
         }
-
+        //设置到properties属性中
         MessageAccessor.setProperties(msgInner, oriProps);
 
         CleanupPolicy cleanupPolicy = CleanupPolicyUtils.getDeletePolicy(Optional.of(topicConfig));
@@ -300,14 +311,20 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         msgInner.setReconsumeTimes(requestHeader.getReconsumeTimes() == null ? 0 : requestHeader.getReconsumeTimes());
         String clusterName = this.brokerController.getBrokerConfig().getBrokerClusterName();
         MessageAccessor.putProperty(msgInner, MessageConst.PROPERTY_CLUSTER, clusterName);
-
+        //将没有WAIT属性的origProps存入msgInner的propertiesString属性
         msgInner.setPropertiesString(MessageDecoder.messageProperties2String(msgInner.getProperties()));
 
         // Map<String, String> oriProps = MessageDecoder.string2messageProperties(requestHeader.getProperties());
+        /*
+         * 处理事务消息逻辑
+         */
+        //TRAN_MSG属性值为true，表示为事务消息
         String traFlag = oriProps.get(MessageConst.PROPERTY_TRANSACTION_PREPARED);
         boolean sendTransactionPrepareMessage = false;
+        //处理事务消息
         if (Boolean.parseBoolean(traFlag)
             && !(msgInner.getReconsumeTimes() > 0 && msgInner.getDelayTimeLevel() > 0)) { //For client under version 4.6.1
+            //判断是否需要拒绝事务消息，如果需要拒绝，则返回NO_PERMISSION异常
             if (this.brokerController.getBrokerConfig().isRejectTransactionMessage()) {
                 response.setCode(ResponseCode.NO_PERMISSION);
                 response.setRemark(
@@ -315,6 +332,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
                         + "] sending transaction message is forbidden");
                 return response;
             }
+            // 标记消息为事物消息
             sendTransactionPrepareMessage = true;
         }
 
@@ -330,6 +348,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
 
             final int finalQueueIdInt = queueIdInt;
             final MessageExtBrokerInner finalMsgInner = msgInner;
+            //阻塞，当从存放消息完毕时，执行后续的操作，即执行handlePutMessageResult方法
             asyncPutMessageFuture.thenAcceptAsync(putMessageResult -> {
                 RemotingCommand responseFuture =
                     handlePutMessageResult(putMessageResult, response, request, finalMsgInner, responseHeader, sendMessageContext,
@@ -354,17 +373,33 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         }
     }
 
+    /**
+     * SendMessageProcessor的方法
+     * <p>
+     * 处理存放消息的结果
+     *
+     * @param putMessageResult   存放结果
+     * @param response           响应对象
+     * @param request            请求对象
+     * @param msg                内部消息对象
+     * @param responseHeader     响应头
+     * @param sendMessageContext 发送消息上下文
+     * @param ctx                连接上下文
+     * @param queueIdInt         queueId
+     * @return
+     */
     private RemotingCommand handlePutMessageResult(PutMessageResult putMessageResult, RemotingCommand response,
         RemotingCommand request, MessageExt msg, SendMessageResponseHeader responseHeader,
         SendMessageContext sendMessageContext, ChannelHandlerContext ctx, int queueIdInt, long beginTimeMillis,
         TopicQueueMappingContext mappingContext, TopicMessageType messageType) {
+        //结果为null，那么直接返回系统异常
         if (putMessageResult == null) {
             response.setCode(ResponseCode.SYSTEM_ERROR);
             response.setRemark("store putMessage return null");
             return response;
         }
         boolean sendOK = false;
-
+        //解析存放消息状态码，转换为对应的响应码
         switch (putMessageResult.getPutMessageStatus()) {
             // Success
             case PUT_OK:
@@ -443,13 +478,15 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         String ownerParent = request.getExtFields().get(BrokerStatsManager.ACCOUNT_OWNER_PARENT);
         String ownerSelf = request.getExtFields().get(BrokerStatsManager.ACCOUNT_OWNER_SELF);
         int commercialSizePerMsg = brokerController.getBrokerConfig().getCommercialSizePerMsg();
+        //如果发送成功
         if (sendOK) {
-
+            //如果topic是SCHEDULE_TOPIC_XXXX，即延迟消息的topic
             if (TopicValidator.RMQ_SYS_SCHEDULE_TOPIC.equals(msg.getTopic())) {
+                //增加统计计数
                 this.brokerController.getBrokerStatsManager().incQueuePutNums(msg.getTopic(), msg.getQueueId(), putMessageResult.getAppendMessageResult().getMsgNum(), 1);
                 this.brokerController.getBrokerStatsManager().incQueuePutSize(msg.getTopic(), msg.getQueueId(), putMessageResult.getAppendMessageResult().getWroteBytes());
             }
-
+            //增加统计计数
             this.brokerController.getBrokerStatsManager().incTopicPutNums(msg.getTopic(), putMessageResult.getAppendMessageResult().getMsgNum(), 1);
             this.brokerController.getBrokerStatsManager().incTopicPutSize(msg.getTopic(),
                 putMessageResult.getAppendMessageResult().getWroteBytes());
@@ -469,9 +506,11 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
             }
 
             response.setRemark(null);
-
+            //设置响应头中的migId，实际上就是broker生成的offsetMsgId属性
             responseHeader.setMsgId(putMessageResult.getAppendMessageResult().getMsgId());
+            //消息队列Id
             responseHeader.setQueueId(queueIdInt);
+            //消息逻辑偏移量
             responseHeader.setQueueOffset(putMessageResult.getAppendMessageResult().getLogicsOffset());
             responseHeader.setTransactionId(MessageClientIDSetter.getUniqID(msg));
 
@@ -479,9 +518,9 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
             if (rewriteResult != null) {
                 return rewriteResult;
             }
-
+            //如果不是单向请求，那么将响应写会客户端
             doResponse(ctx, request, response);
-
+            //如果有发送消息的钩子，那么执行
             if (hasSendMessageHook()) {
                 sendMessageContext.setMsgId(responseHeader.getMsgId());
                 sendMessageContext.setQueueId(responseHeader.getQueueId());
@@ -508,6 +547,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
             }
             return null;
         } else {
+            //如果有发送消息的钩子，那么执行
             if (hasSendMessageHook()) {
                 AppendMessageResult appendMessageResult = putMessageResult.getAppendMessageResult();
 
@@ -665,24 +705,28 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
 
     private RemotingCommand preSend(ChannelHandlerContext ctx, RemotingCommand request,
         SendMessageRequestHeader requestHeader) {
+        //创建响应命令对象
         final RemotingCommand response = RemotingCommand.createResponseCommand(SendMessageResponseHeader.class);
-
+        //设置唯一id为请求id
         response.setOpaque(request.getOpaque());
-
+        //添加扩展字段属性"MSG_REGION"、"TRACE_ON"
         response.addExtField(MessageConst.PROPERTY_MSG_REGION, this.brokerController.getBrokerConfig().getRegionId());
         response.addExtField(MessageConst.PROPERTY_TRACE_SWITCH, String.valueOf(this.brokerController.getBrokerConfig().isTraceOn()));
 
         LOGGER.debug("Receive SendMessage request command {}", request);
-
+        //获取配置的broker的处理请求的起始服务时间，默认为0
         final long startTimestamp = this.brokerController.getBrokerConfig().getStartAcceptSendRequestTimeStamp();
-
+        //如果当前时间小于起始时间，那么broker会返回一个SYSTEM_ERROR，表示现在broker还不能提供服务
         if (this.brokerController.getMessageStore().now() < startTimestamp) {
             response.setCode(ResponseCode.SYSTEM_ERROR);
             response.setRemark(String.format("broker unable to service, until %s", UtilAll.timeMillisToHumanString2(startTimestamp)));
             return response;
         }
-
+        //设置code为-1
         response.setCode(-1);
+        /*
+         * 消息校验，包括自动创建topic的逻辑
+         */
         super.msgCheck(ctx, requestHeader, request, response);
 
         return response;
