@@ -59,6 +59,7 @@ import sun.misc.Unsafe;
 import sun.nio.ch.DirectBuffer;
 
 public class DefaultMappedFile extends AbstractMappedFile {
+    // 操作系统每页大小，默认4KB
     public static final int OS_PAGE_SIZE = 1024 * 4;
     public static final Unsafe UNSAFE = getUnsafe();
     private static final Method IS_LOADED_METHOD;
@@ -66,29 +67,47 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     protected static final Logger log = LoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
 
+    // 当前JVM实例中MappedFile的虚拟内存
     protected static final AtomicLong TOTAL_MAPPED_VIRTUAL_MEMORY = new AtomicLong(0);
 
+    // 当前JVM实例中MappedFile对象个数
     protected static final AtomicInteger TOTAL_MAPPED_FILES = new AtomicInteger(0);
 
     protected static final AtomicIntegerFieldUpdater<DefaultMappedFile> WROTE_POSITION_UPDATER;
     protected static final AtomicIntegerFieldUpdater<DefaultMappedFile> COMMITTED_POSITION_UPDATER;
     protected static final AtomicIntegerFieldUpdater<DefaultMappedFile> FLUSHED_POSITION_UPDATER;
 
+    // 当前文件的写指针，从0开始（内存映射文件中的写指针）
     protected volatile int wrotePosition;
+    // 当前文件的提交指针，
+    // 如果开启transientStore-PoolEnable，则数据会存储在TransientStorePool中，
+    // 然后提交到内存映射ByteBuffer中，再写入磁盘。
     protected volatile int committedPosition;
+    // 将该指针之前的数据持久化存储到磁盘中
     protected volatile int flushedPosition;
+    // 文件大小
     protected int fileSize;
+    // 文件通道
     protected FileChannel fileChannel;
     /**
      * Message will put to here first, and then reput to FileChannel if writeBuffer is not null.
      */
+    // 堆外内存ByteBuffer，如果不为空，数据首先将存储在该Buffer中，然后提交到MappedFile创建的FileChannel中。
+    // transientStorePoolEnable为true时不为空
     protected ByteBuffer writeBuffer = null;
+    //堆外内存池，该内存池中的内存会提供内存锁机制。transientStorePoolEnable为true时启用
     protected TransientStorePool transientStorePool = null;
+    // 文件名称
     protected String fileName;
+    // 该文件的初始偏移量
     protected long fileFromOffset;
+    // 物理文件
     protected File file;
+    // 物理文件对应的内存映射Buffer
     protected MappedByteBuffer mappedByteBuffer;
+    // 文件最后一次写入内容时间
     protected volatile long storeTimestamp = 0;
+    // 是否是MappedFileQueue队列中第一个文件
     protected boolean firstCreateInQueue = false;
     private long lastFlushTime = -1L;
 
@@ -151,6 +170,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
     public void init(final String fileName, final int fileSize,
         final TransientStorePool transientStorePool) throws IOException {
         init(fileName, fileSize);
+        // 如果transientStorePoolEnable为true，则初始化MappedFile的writeBuffer，
+        // 该buffer从transientStorePool中获取
         this.writeBuffer = transientStorePool.borrowBuffer();
         this.transientStorePool = transientStorePool;
     }
@@ -309,6 +330,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             this.storeTimestamp = result.getStoreTimestamp();
             return result;
         }
+        // 如果currentPos大于或等于文件大小，表明文件已写满，抛出AppendMessageStatus.UNKNOWN_ERROR
         log.error("MappedFile.appendMessage return null, wrotePosition: {} fileSize: {}", currentPos, this.fileSize);
         return new AppendMessageResult(AppendMessageStatus.UNKNOWN_ERROR);
     }
@@ -374,6 +396,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
     }
 
     /**
+     * 直接调用mappedByteBuffer或fileChannel的force()方法将数据写入磁盘，将内存中的数据持久化到磁盘中，
+     * 那么flushedPosition应该等于MappedByteBuffer中的写指针。
+     * 如果writeBuffer不为空，则flushedPosition应等于上一次commit指针。
+     * 因为上一次提交的数据就是进入MappedByteBuffer中的数据。
+     * 如果writeBuffer为空，表示数据是直接进入MappedByteBuffer的，
+     * wrotePosition代表的是MappedByteBuffer中的指针，
+     * 故设置flushedPosition为wrotePosition。”
      * @return The current flushed position
      */
     @Override
@@ -408,6 +437,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     @Override
     public int commit(final int commitLeastPages) {
+        // commitLeastPages为本次提交的最小页数
         if (writeBuffer == null) {
             //no need to commit data to file channel, so just regard wrotePosition as committedPosition.
             return WROTE_POSITION_UPDATER.get(this);
@@ -416,7 +446,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
         //no need to commit data to file channel, so just set committedPosition to wrotePosition.
         if (transientStorePool != null && !transientStorePool.isRealCommit()) {
             COMMITTED_POSITION_UPDATER.set(this, WROTE_POSITION_UPDATER.get(this));
-        } else if (this.isAbleToCommit(commitLeastPages)) {
+        } else if (this.isAbleToCommit(commitLeastPages)) {//如果待提交数据不满足commitLeastPages，则不执行本次提交操作，等待下次提交
             if (this.hold()) {
                 commit0();
                 this.release();
@@ -434,6 +464,15 @@ public class DefaultMappedFile extends AbstractMappedFile {
         return COMMITTED_POSITION_UPDATER.get(this);
     }
 
+    /**
+     * “下面介绍具体的MappedFile提交实现过程。
+     * 首先创建writeBuffer的共享缓存区，
+     * 然后将新创建的position回退到上一次提交的位置（committedPosition），设置limit为wrotePosition（当前最大有效数据指针），
+     * 接着把committedPosition到wrotePosition的数据复制（写入）到FileChannel中，
+     * 最后更新committedPosition指针为wrotePosition。
+     * commit的作用是将MappedFile# writeBuffer中的数据提交到文件通道FileChannel中。
+     *  ByteBuffer使用技巧：调用slice()方法创建一个共享缓存区，与原先的ByteBuffer共享内存并维护一套独立的指针（position、mark、limit）
+     */
     protected void commit0() {
         int writePos = WROTE_POSITION_UPDATER.get(this);
         int lastCommittedPosition = COMMITTED_POSITION_UPDATER.get(this);
@@ -467,14 +506,25 @@ public class DefaultMappedFile extends AbstractMappedFile {
         return write > flush;
     }
 
+    /**
+     * 判断是否执行commit操作
+     * @param commitLeastPages
+     * @return
+     */
     protected boolean isAbleToCommit(final int commitLeastPages) {
         int commit = COMMITTED_POSITION_UPDATER.get(this);
         int write = WROTE_POSITION_UPDATER.get(this);
 
+        // 如果文件已满，返回true
         if (this.isFull()) {
             return true;
         }
 
+        // 如果commitLeastPages大于0，
+        // 则计算wrotePosition（当前writeBuffe的写指针）与上一次提交的指针（committedPosition）的差值，
+        // 将其除以OS_PAGE_SIZE得到当前脏页的数量
+        // “如果大于commitLeastPages，则返回true。
+        // 如果commitLeastPages小于0，表示只要存在脏页就提交
         if (commitLeastPages > 0) {
             return ((write / OS_PAGE_SIZE) - (commit / OS_PAGE_SIZE)) >= commitLeastPages;
         }
@@ -523,6 +573,11 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     @Override
     public SelectMappedBufferResult selectMappedBuffer(int pos) {
+        // 首先查找pos到当前最大可读指针之间的数据，
+        // 因为在整个写入期间都未曾改变MappedByteBuffer的指针，所以mappedByteBuffer.slice()方法返回的共享缓存区空间为整个MappedFile。
+        // 然后通过设置byteBuffer的position为待查找的值，读取字节为当前可读字节长度，
+        // 最终返回的ByteBuffer的limit（可读最大长度）为size。
+        // 整个共享缓存区的容量为MappedFile#fileSizepos，故在操作SelectMappedBufferResult时不能对包含在里面的ByteBuffer调用flip()方法。
         int readPosition = getReadPosition();
         if (pos < readPosition && pos >= 0) {
             if (this.hold()) {
@@ -541,6 +596,11 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     @Override
     public boolean cleanup(final long currentRef) {
+        // 如果available为true，表示MappedFile当前可用，无须清理，返回false，
+        // 如果资源已经被清除，返回true。
+        // 如果是堆外内存，调用堆外内存的cleanup()方法进行清除，
+        // 维护MappedFile类变量TOTAL_MAPPED_VIRTUAL_MEMORY、TOTAL_MAPPED_FILES并返回true，
+        // 表示cleanupOver为true
         if (this.isAvailable()) {
             log.error("this file[REF:" + currentRef + "] " + this.fileName
                 + " have not shutdown, stop unmapping.");
@@ -562,6 +622,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
         return true;
     }
 
+    // MappedFile销毁
+    // intervalForcibly表示拒绝被销毁的最大存活时间
     @Override
     public boolean destroy(final long intervalForcibly) {
         this.shutdown(intervalForcibly);
@@ -603,17 +665,23 @@ public class DefaultMappedFile extends AbstractMappedFile {
     }
 
     /**
+     *  获取当前文件最大的可读指针
      * @return The max position which have valid data
      */
     @Override
     public int getReadPosition() {
-        return transientStorePool == null || !transientStorePool.isRealCommit() ? WROTE_POSITION_UPDATER.get(this) : COMMITTED_POSITION_UPDATER.get(this);
+        // 如果transientStorePool为空，则直接返回当前的写指针。
+        // 如果transientStorePool不为空，则返回上一次提交的指针。
+        // 在MappedFile设计中，只有提交了的数据（写入MappedByteBuffer或FileChannel中的数据）才是安全的数据。”
+        return transientStorePool == null || !transientStorePool.isRealCommit() ?
+                WROTE_POSITION_UPDATER.get(this) : COMMITTED_POSITION_UPDATER.get(this);
     }
 
     @Override
     public void setCommittedPosition(int pos) {
         COMMITTED_POSITION_UPDATER.set(this, pos);
     }
+
 
     @Override
     public void warmMappedFile(FlushDiskType type, int pages) {

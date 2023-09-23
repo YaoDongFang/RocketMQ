@@ -608,6 +608,11 @@ public class DefaultMessageStore implements MessageStore {
         this.consumeQueueStore.destroy();
     }
 
+    /**
+     * 处理、存储消息
+     * @param msg MessageInstance to store
+     * @return
+     */
     @Override
     public CompletableFuture<PutMessageResult> asyncPutMessage(MessageExtBrokerInner msg) {
 

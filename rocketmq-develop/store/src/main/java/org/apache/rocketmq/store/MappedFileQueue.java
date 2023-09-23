@@ -41,15 +41,21 @@ public class MappedFileQueue implements Swappable {
     private static final Logger log = LoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
     private static final Logger LOG_ERROR = LoggerFactory.getLogger(LoggerName.STORE_ERROR_LOGGER_NAME);
 
+    // 存储目录
     protected final String storePath;
 
+    // 单个文件的存储大小
     protected final int mappedFileSize;
 
+    // MappedFile集合
     protected final CopyOnWriteArrayList<MappedFile> mappedFiles = new CopyOnWriteArrayList<>();
 
+    // 创建MappedFile服务类
     protected final AllocateMappedFileService allocateMappedFileService;
 
+    // 当前刷盘指针，表示该指针之前的所有数据全部持久化到磁盘
     protected long flushedWhere = 0;
+    // 当前数据提交指针，内存中ByteBuffer当前的写指针，该值大于、等于flushedWhere
     protected long committedWhere = 0;
 
     protected volatile long storeTimestamp = 0;
@@ -432,6 +438,11 @@ public class MappedFileQueue implements Swappable {
         return true;
     }
 
+    /**
+     *
+     * 获取存储文件最小偏移量。从这里也可以看出，并不是直接返回0，而是返回MappedFile的getFileFormOffset()方法
+     * @return
+     */
     public long getMinOffset() {
 
         if (!this.mappedFiles.isEmpty()) {
@@ -446,6 +457,10 @@ public class MappedFileQueue implements Swappable {
         return -1;
     }
 
+    /**
+     * “获取存储文件的最大偏移量。返回最后一个MappedFile的fileFromOffset，加上MappedFile当前的写指针”
+     * @return
+     */
     public long getMaxOffset() {
         MappedFile mappedFile = getLastMappedFile();
         if (mappedFile != null) {
@@ -677,6 +692,7 @@ public class MappedFileQueue implements Swappable {
             MappedFile firstMappedFile = this.getFirstMappedFile();
             MappedFile lastMappedFile = this.getLastMappedFile();
             if (firstMappedFile != null && lastMappedFile != null) {
+                // 偏移量需要在此mapperFileQueue中
                 if (offset < firstMappedFile.getFileFromOffset() || offset >= lastMappedFile.getFileFromOffset() + this.mappedFileSize) {
                     LOG_ERROR.warn("Offset not matched. Request offset: {}, firstOffset: {}, lastOffset: {}, mappedFileSize: {}, mappedFiles count: {}",
                         offset,
@@ -685,6 +701,11 @@ public class MappedFileQueue implements Swappable {
                         this.mappedFileSize,
                         this.mappedFiles.size());
                 } else {
+                    // 根据消息偏移量offset查找MappedFile，但是不能直接使用offset%mappedFileSize
+                    // “这是因为使用了内存映射，只要是存在于存储目录下的文件，都需要对应创建内存映射文件，
+                    // 如果不定时将已消费的消息从存储文件中删除，会造成极大的内存压力与资源浪费，所以RocketMQ采取定时删除存储文件的策略。
+                    // 也就是说，在存储文件中，第一个文件不一定是00000000000000000000，
+                    // 因为该文件在某一时刻会被删除，所以根据offset定位MappedFile的算法为下
                     int index = (int) ((offset / this.mappedFileSize) - (firstMappedFile.getFileFromOffset() / this.mappedFileSize));
                     MappedFile targetFile = null;
                     try {
